@@ -217,6 +217,22 @@ class Main {
       });
     }
 
+    // iOS 音频打断恢复：游戏中来电 / Siri / 其他 App 抢音频时，系统会挂起 AudioContext，
+    // 此时 App 并未进后台、onShow 不会触发。若只靠 onShow 恢复，会导致之后所有战斗音效持续静音，
+    // 直到用户手动切一次后台再回来。故在打断结束立即 resume；打断开始先停旋转声，避免挂起期卡住/重叠。
+    if (typeof wx !== 'undefined') {
+      if (wx.onAudioInterruptionEnd) {
+        wx.onAudioInterruptionEnd(() => {
+          try { if (this.audio) this.audio.resume(); } catch (e) {}
+        });
+      }
+      if (wx.onAudioInterruptionBegin) {
+        wx.onAudioInterruptionBegin(() => {
+          try { if (this.audio) this.audio.stopSpin(); } catch (e) {}
+        });
+      }
+    }
+
     // 全局错误兜底
     if (typeof wx !== 'undefined' && wx.onError) {
       wx.onError((err) => { console.error('[global]', err); });
