@@ -1,0 +1,20 @@
+name: Smoke Tests
+
+# 陀螺大师冒烟测试 CI：任意 push / PR 自动跑 4 个冒烟套件。
+# 注意：本机（Intel Mac）当前无法直连 GitHub，工作流仅在仓库推送到 GitHub 后才会在云端运行。
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: Run smoke tests
+        run: node tests/run.js

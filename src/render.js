@@ -1,0 +1,3625 @@
+/**
+ * Canvas 2D 渲染器（UX 重构版 · 2026-08-19）
+ * 设计目标：
+ *  - 严格分层：TopBar / Title / Arena / ActionBar / FilterBar / Inventory，每层有独立底边，互不越界。
+ *  - 对 375×667（iPhone SE）→ 430×932（iPhone 15 Pro Max）全机型自适应，内容不撞胶囊、不撞 Home Bar、不互相压盖。
+ *  - 安全区基线（Main.js 传入）：safeTop ≥ 胶囊底 + 10px 气隙；safeBottom ≥ screenHeight-windowHeight。
+ *  - 苹果风视觉：渐变按钮、投影、按下态、苹方/SF 字体栈、圆角胶囊 HUD。
+ */
+
+const { drawBeyblade, TIERS, Beyblade } = require('./beyblade');
+const { isPointInRect, formatNumber, drawVectorIcon, prepSrc: _prepSrc } = require('./utils');
+const { CONFIG } = require('./config');
+const { SIGN_REWARDS } = require('./game');
+
+const APPLE_FONT = '-apple-system, BlinkMacSystemFont, "SF Pro Text", "SF Pro Display", "PingFang SC", "Helvetica Neue", sans-serif';
+
+// 模态面板遮罩透明度统一（P2-7）：原 0.72/0.78/0.80/0.82 四种散落各处，统一为单一常量
+const PANEL_MASK_ALPHA = 0.82;
+const PANEL_MASK = 'rgba(10,5,25,' + PANEL_MASK_ALPHA + ')';
+
+// 静态/重复文本测量缓存：measureText 依赖 ctx.font，按 font+text 做 Map 缓存，
+// 避免内容恒定的按钮名/标签每帧重复排版计算（P1-8-4）。
+const _mtCache = new Map();
+function mtW(ctx, text) {
+  const k = ctx.font + '' + text;
+  let v = _mtCache.get(k);
+  if (v === undefined) { v = ctx.measureText(text).width; _mtCache.set(k, v); }
+  return v;
+}
+
+class Renderer {
+  constructor(canvas, ctx, game, safeTop = 56, safeBottom = 24, menuBtn = null) {
+    this.canvas = canvas;
+    this.ctx = ctx;
+    this.game = game;
+    this.width = canvas.width;
+    this.height = canvas.height;
+    // 安全区域统一处理：验证和修正safeTop/safeBottom，确保在合理范围内
+    // - safeTop：最小20px（状态栏），最大120px（避免异常值导致布局错位）
+    // - safeBottom：最小10px（Home指示条），最大80px（避免异常值导致布局错位）
+    // - 安全区域总和不超过屏幕高度的30%（避免异常值导致内容区域过小）
+    const rawSafeTop = typeof safeTop === 'number' && safeTop > 0 ? safeTop : 56;
+    const rawSafeBottom = typeof safeBottom === 'number' && safeBottom > 0 ? safeBottom : 24;
+    const maxSafeTotal = canvas.height * 0.3;
+    this.safeTop = Math.max(20, Math.min(120, rawSafeTop));
+    this.safeBottom = Math.max(10, Math.min(80, rawSafeBottom));
+    if (this.safeTop + this.safeBottom > maxSafeTotal) {
+      // 安全区域过大，按比例缩减
+      const ratio = maxSafeTotal / (this.safeTop + this.safeBottom);
+      this.safeTop = Math.max(20, Math.floor(this.safeTop * ratio));
+      this.safeBottom = Math.max(10, Math.floor(this.safeBottom * ratio));
+    }
+    this.menuBtn = menuBtn || null;   // 微信胶囊矩形（逻辑坐标），用于胶囊左侧手柄入口
+
+    // 真实 PNG 数字资产（设计稿 v3 落地）：顶栏/道具图标替换矢量绘制
+    this.icons = {};
+    this._iconFiles = {
+      coin: 'icon-coin.png', mute: 'icon-mute.png', unmute: 'icon-unmute.png',
+      share: 'icon-share.png', sign: 'icon-sign.png', check: 'icon-check.png',
+      back: 'icon-back.png', more: 'icon-more.png',
+      metal: 'icon-metal.png', wood: 'icon-wood.png', water: 'icon-water.png', fire: 'icon-fire.png', earth: 'icon-earth.png',
+      speed: 'icon-speed.png', double: 'icon-double.png', slow: 'icon-slow.png',
+      energy: 'icon-energy.png',
+      task: 'icon-task.png', chest: 'icon-chest.png',
+      'daily-battle': 'icon-daily-battle.png', 'daily-merge': 'icon-daily-merge.png', 'daily-draw': 'icon-daily-draw.png',
+      arena: 'icon-arena.png',
+      'rank-bronze': 'icon-rank-bronze.png', 'rank-silver': 'icon-rank-silver.png',
+      'rank-gold': 'icon-rank-gold.png', 'rank-platinum': 'icon-rank-platinum.png',
+      'rank-diamond': 'icon-rank-diamond.png', 'rank-master': 'icon-rank-master.png',
+      // 图标资产 v3：替换文本字符 ★✦▶（图鉴集齐/传说标题/签到大奖/宝箱/结算再战）
+      star: 'icon-star.png', sparkle: 'icon-sparkle.png', play: 'icon-play.png', lock: 'icon-lock.png',
+      // 图标资产 v3 补漏：分页箭头 / 弹窗关闭 / Tab 合成 / Tab 图鉴
+      prev: 'icon-prev.png', next: 'icon-next.png', close: 'icon-close.png',
+      merge: 'icon-merge.png', codex: 'icon-codex.png'
+    };
+    this._loadIcons();
+
+    this._reflow();
+
+    this.pressedBtn = null;
+    this.buttons = [];
+    // 按钮对象池：避免每帧创建新按钮对象，复用对象减少GC压力
+    // 诊断高频GC是卡顿主因之一，按钮是每帧创建最多的对象类型
+    this._buttonPool = [];
+    this.gridRects = [];
+    this.platformRects = [];
+    this.filterRects = [];
+    this.tabRects = [];
+    this.particles = [];
+    this.rings = [];
+    this.floatTexts = [];
+    this.drag = null;
+    this.modalRects = [];
+    this.clubGuideRects = [];
+    this.audio = null;
+    this._frameCount = 0;
+    // 性能缓存：离屏背景 / 布局签名 / 命中区复用（降低每帧 CPU 计算与 GC 压力）
+    this._bgCache = null;
+    this._bgCacheKey = null;
+    this._layoutSig = null;
+    // 低端机 / iOS shadow 降级档：软投影是 Canvas2D 最贵绘制路径。
+    // auto 按 compact（小屏低端）或 iOS（WebKit 软件渲染阴影极贵，无 GPU 加速）判定；
+    // 并允许 game.lowFX 强制 0/1 覆盖。
+    this.shadowScale = 1;        // 装饰阴影档（标题辉光/能量条/格子/弹层等每帧开销）
+    this.pressShadow = 1;        // 按下态阴影档（仅触摸反馈，短促低密度，始终保留手感）
+    this._isIOS = false;
+    this._isAndroid = false;
+    this._androidFontScale = 1; // 安卓字体缩放系数（部分机型系统字体放大导致布局错位）
+    try {
+      if (typeof wx !== 'undefined' && wx.getSystemInfoSync) {
+        const si = wx.getSystemInfoSync();
+        this._isIOS = (si.platform === 'ios') || /iOS/i.test(si.system || '');
+        this._isAndroid = (si.platform === 'android') || /Android/i.test(si.system || '');
+        // 安卓字体缩放：fontSizeSetting > 16 表示系统字体放大，需要反向缩放布局
+        if (this._isAndroid && si.fontSizeSetting && si.fontSizeSetting > 16) {
+          this._androidFontScale = Math.max(0.85, 16 / si.fontSizeSetting);
+        }
+      } else if (typeof navigator !== 'undefined' && (navigator.platform || navigator.userAgent)) {
+        const ua = (navigator.platform || '') + ' ' + (navigator.userAgent || '');
+        this._isIOS = /iPhone|iPad|iPod/i.test(ua);
+        this._isAndroid = /Android/i.test(ua);
+      }
+    } catch (e) {}
+    // 高频渐变缓存（能量条 / 平台底板等每帧重建的渐变），降低每帧分配与 GC
+    this._gradCache = {};
+
+    this.stars = [];
+    let seed = 1234.5678;
+    for (let i = 0; i < 26; i++) {
+      seed = (seed * 9301 + 49297) % 233280;
+      const rx = seed / 233280;
+      seed = (seed * 9301 + 49297) % 233280;
+      const ry = seed / 233280;
+      seed = (seed * 9301 + 49297) % 233280;
+      const rs = seed / 233280;
+      this.stars.push({ rx, ry, s: (i % 3) + 1, a: 0.12 + (i % 5) * 0.05 });
+    }
+  }
+
+  // ==========================================================
+  // 按钮对象池：避免每帧创建新按钮对象，复用对象减少GC压力
+  // 诊断高频GC是卡顿主因之一，按钮是每帧创建最多的对象类型
+  // ==========================================================
+
+  /** 从对象池获取按钮对象，设置属性后返回 */
+  getButton(x, y, w, h, action) {
+    const btn = this._buttonPool.pop() || {};
+    btn.x = x; btn.y = y; btn.w = w; btn.h = h; btn.action = action;
+    return btn;
+  }
+
+  /** 将当前帧的按钮对象全部回收到对象池（在render()开始时调用） */
+  releaseButtons() {
+    for (let i = 0; i < this.buttons.length; i++) {
+      const btn = this.buttons[i];
+      // 清理引用，避免内存泄漏
+      for (const k in btn) delete btn[k];
+      this._buttonPool.push(btn);
+    }
+    this.buttons.length = 0;
+    // 对象池上限：避免长期运行后对象池无限增长
+    if (this._buttonPool.length > 200) {
+      this._buttonPool.length = 200;
+    }
+  }
+
+  /** 画布尺寸变化或首次布局：一次性算出所有区域的 y 分隔线和尺寸。
+   *
+   *  V2（UX 重构 · 解遮挡）：
+   *   - 先"自底向上"锁定底部固定成本（ActionBar + FilterBar + Inventory 硬 2 行保底），
+   *     剩余高度全部给 Arena，解决 SE 1 行背包 / 大屏留白双问题。
+   *   - SubBar（回满/广告）条件性存在：不存在时直接折叠（不给 Title 留空挡），释放 ~30px。
+   *   - 过滤器区：SE 下把"抽取"缩到 68，过滤器用 5 字（不切单字）；宽度不够才启动 2 字兜底。
+   *   - 图鉴：Lv 标签在 cell 内 top 内嵌，不再悬到 cell 下方与下一行重叠。
+   *   - 所有 Y 坐标按严格不等式校验：上区底 <= 下区顶 - 气隙。
+   */
+  _reflow() {
+    // 布局几何变化 → 缓存渐变（绑定旧坐标）与背景离屏（依赖旧尺寸）全部失效
+    this._gradCache = {};
+    const W = this.width, H = this.height;
+    const ST = this.safeTop, SB = this.safeBottom;
+
+    // ==========================================================
+    // 辅助：判断 SubBar 是否有按钮（与 drawHeader 逻辑一致）
+    // 若两个条件都不满足，SubBar 折叠为 0，避免 24px 死白。
+    // ==========================================================
+    const hasRefill = !!(this.game.canRefill && this.game.canRefill()) && this.game.energy < this.game.maxEnergy;
+    const hasAdE = !!(this.game.canWatchAdEnergy && this.game.canWatchAdEnergy());
+    // SubBar（免费回满/广告+60/朋友助力）暂时隐藏，后面用别的方式调用
+    const subExists = false; // 原：hasRefill || hasAdE
+
+    // ==========================================================
+    // 自适应档位：按「内容可用高度」+「屏宽」联合判定，适配更多手机（尤其安卓）
+    //   compact = 内容高 < 650 || 屏宽 < 370
+    //   · iPhone SE 375×667 → contentH=583 < 650 → compact ✓
+    //   · Android 360×640 → contentH=592 < 650 → compact ✓
+    //   · Android 360×740 → contentH=676, W=360 < 370 → compact ✓（安卓窄屏也紧凑）
+    //   · Android 412×915 → contentH=835, W=412 → 不 compact（大屏充足）
+    //   · iPhone 14 390×844 → contentH=754 → 不 compact（纵向充足）
+    // ==========================================================
+    const contentH = H - ST - SB;
+    let compact = contentH < 650 || W < 370;
+
+    // ==========================================================
+    // 安卓机型特殊适配：
+    // 1. 系统字体放大（fontSizeSetting > 16）导致文字溢出布局
+    // 2. 安卓字体渲染差异（行高、字间距）导致视觉错位
+    // 3. 部分低端安卓机屏幕密度低，需要更紧凑的布局
+    // 解决方案：全局字体缩放系数 + 紧凑布局强制开启
+    // ==========================================================
+    const fontScale = this._androidFontScale || 1;
+    if (this._isAndroid) {
+      // 安卓机型：系统字体放大超过10%时强制compact，避免文字溢出
+      if (fontScale < 0.95) compact = true;
+      // 安卓低端机（benchmarkLevel < 30）也强制compact
+      if (this.perfLevel === 'LOW') compact = true;
+    }
+
+    // ==========================================================
+    // 区域 1 · TopBar（胶囊下方气隙后第一行：左金币 / 中能量条居中 / 右图标组）
+    // ==========================================================
+    const topBarH = (compact ? 42 : 46);
+    const topBarY = ST + 8;
+    const leftPad = 16, rightPad = 16; // rightPad 12→16，能量条和右侧图标间距增加4px，呼吸感更好
+    const signBtnW = compact ? 46 : 52;
+    const icoW = (compact ? 34 : 38), icoGap = (compact ? 6 : 8);
+    const rightIconsW = signBtnW + icoW + icoGap;  // 签到 + 音量（分享已去除）
+    const rightXStart = W - rightPad - rightIconsW;
+    // 能量条：以屏幕中心线为中心，固定宽度居中，不靠边
+    const energyW = Math.min(140, Math.max(100, Math.floor(W * 0.36))); // 宽度100-140，按屏自适应
+    const energyX = (W - energyW) / 2; // 居中
+    // 金币宽度：限制在能量条左边，不重叠（左16到能量条x-16，间距10→16，增加6px呼吸感）
+    const coinMaxW = Math.max(60, energyX - leftPad - 16);
+    const coinEstW = Math.min(coinMaxW, Math.max(compact ? 72 : 84, Math.floor(W * 0.28)));
+    const coinXEnd = leftPad + coinEstW;
+
+    // ==========================================================
+    // 区域 1.5 · SubBar（免费回满 / 广告+60 独立一行）— 条件折叠
+    // ==========================================================
+    const subBtnH = 24;
+    const subBtnGap = 8;
+    const topSubGap = (compact ? 4 : 6);
+    const subTitleGap = subExists ? (compact ? 6 : 10) : 6;
+    const subBarY = subExists ? (topBarY + topBarH + topSubGap) : (topBarY + topBarH);
+    const subBarH = subExists ? subBtnH : 0;
+
+    // ==========================================================
+    // 区域 2 · Title（游戏名 + 副标题 + Tab）
+    //   紧凑版（24+18+28 = 70）：SE 再省 26px
+    // ==========================================================
+    const titleY = subBarY + (subExists ? (subBarH + subTitleGap) : 6);
+    const titleInnerHeadGap = compact ? 0 : 1; // 减少顶部间距，让Tab更靠上
+    const titleTitleSize = compact ? 22 : 26; // 标题字号28→26，减少2px
+    const titleSubGap = compact ? 2 : 4; // 副标题间距6→4，减少2px
+    const titleSubLineH = compact ? 12 : 16; // 副标题高度20→16，减少4px
+    const titleTabGap = compact ? 0 : 0; // Tab间距设为0（最小合理值）
+    const titleTabH = (compact ? 26 : 28);
+    const titleFootGap = 1;
+    const titleH = titleInnerHeadGap + titleTitleSize + titleSubGap + titleSubLineH + titleTabGap + titleTabH + titleFootGap;
+    // Tab：SE 从 76→72；同时按 W 均分，不居中留白太多
+    const tabBaseW = compact ? 72 : 76;
+    const tabTotalGap = 16;
+    const tabW = Math.min(tabBaseW, Math.max(68, Math.floor((W - 40 - tabTotalGap) / 2)));
+    const tabY = titleY + titleInnerHeadGap + titleTitleSize + titleSubGap + titleSubLineH + titleTabGap;
+    // Title↔Arena 气隙：SE 从 8→4（圆盘自己有 12 阴影，不会看起来贴标题）
+    const titleArenaGap = compact ? 4 : 12;
+
+    // ==========================================================
+    // 区域 4 · ActionBar（对战 / 合成）· 自底向上预算高度
+    // 区域 5 · FilterBar
+    // 区域 6 · Inventory · 保底 2 行；先按「软 cell/gap」估预算，若 2 行会越安全区 → 缩 cell 仍保≥44，再缩 gap 保≥6，最后缩 sbPeg 气隙。
+    //                    目标不等式：invY + 2*cell + gap ≤ invMaxBottom（2行底 = y + rowStep*2 - gap）
+    // ==========================================================
+    const actionBtnH = compact ? 34 : 40;
+    const filterH = compact ? 28 : 38;
+    const GAP1 = (compact ? 6 : 10);
+    const GAP2 = (compact ? 6 : 10);
+    const SB_PEG_INIT = (compact ? 4 : 8);
+    const ARENA_ACTION_GAP = (compact ? 8 : 12);
+    // 大圆盘与上下两行（tab 行 / 操作按钮行）的最小呼吸间距：保证两端不贴脸（叠加圆盘 12px 阴影后仍留余量）
+    const ARENA_BREATH = (compact ? 16 : 24);
+    const invCols = Math.max(4, Math.min(5, Math.floor((W - 32) / (58 + 10))));
+    let invGap = 10;
+    const invCellByW = Math.floor((W - 32 - (invCols - 1) * invGap) / invCols);
+    let invCell = Math.max(44, Math.min(invCellByW, 58));
+    let invRowStep = invCell + invGap;
+
+    // 先按当前软参数估 Arena → actionY → filterY → invY，再校验 3 行是否撞安全区；
+    // 若撞：①缩 cell(>44) → ②缩 gap(>6) → ③缩 sbPeg(>0) → ④缩 minArenaH (最低 180)
+    const PAD_BUDGET = (g, c) => g * 3 + c * 3 - g; // (c+g)*3 - g = 3c+2g
+    let sbPeg = SB_PEG_INIT;
+    let minArenaH = 210;
+    function makeBottomFixed(gap, cell, peg) {
+      const inv = (cell + gap) * 3;
+      return ARENA_ACTION_GAP + actionBtnH + GAP1 + filterH + GAP2 + inv + peg;
+    }
+    function estimateInvY(gap, cell, peg, mah) {
+      const bf = makeBottomFixed(gap, cell, peg);
+      const maxArenaBottom = H - SB - bf;
+      const minArenaY0 = titleY + titleH + titleArenaGap;
+      const arenaDiameterMaxW = Math.min(W - 48, Math.max(284, Math.floor(W * 0.72)));
+      const arenaH = Math.max(mah, Math.min(maxArenaBottom - minArenaY0 - 2 * ARENA_BREATH, arenaDiameterMaxW));
+      const arenaY = minArenaY0 + Math.max(0, Math.floor((maxArenaBottom - minArenaY0 - arenaH) / 2));
+      const actionY2 = arenaY + arenaH + ARENA_ACTION_GAP;
+      const filterY2 = actionY2 + actionBtnH + GAP1;
+      return { invY: filterY2 + filterH + GAP2, invMaxBottom: H - SB - peg };
+    }
+    // 迭代收敛：最多 90 轮（使用"目标 I6 不等式"直接判定，不使用 bottomFixed 中间量近似）
+    //   1-30 轮：缩 cell(>44) / gap(>6) / sbPeg
+    //   31-60 轮：缩 minArenaH (>190) + cell/gap 继续
+    //   61-90 轮：**最后手段**：minArenaH↓170（Arena 最小 170·340/2=170，仍远>陀螺半径+合成槽+道具可视），
+    //             并允许 cell↓38 / gap↓2 — cell≥38 仍是 HIG 推荐 40 的 ±2 可按区域
+    // 核心不等式 target：invY + 3*rowStep - gap ≤ H - SB - sbPeg
+    for (let iter = 0; iter < 90; iter++) {
+      const { invY: yTest, invMaxBottom: mb } = estimateInvY(invGap, invCell, sbPeg, minArenaH);
+      const rowStep = invCell + invGap;
+      const invBottom = yTest + rowStep * 3 - invGap;
+      if (invBottom <= mb) break;
+      if (iter < 30) {
+        if (invCell > 44) { invCell--; continue; }
+        if (invGap > 6)  { invGap--; continue; }
+        if (sbPeg > 0)  { sbPeg--; continue; }
+        if (minArenaH > 190) { minArenaH--; continue; }
+        continue;
+      }
+      if (iter < 60) {
+        if (minArenaH > 190) { minArenaH--; continue; }
+        if (invCell > 40) { invCell--; continue; }
+        if (invGap > 4)  { invGap--; continue; }
+        continue;
+      }
+      // 最后手段：极限压缩
+      if (minArenaH > 170) { minArenaH--; continue; }
+      if (invCell > 38)  { invCell--; continue; }
+      if (invGap > 2)    { invGap--; continue; }
+      break;
+    }
+    invRowStep = invCell + invGap;
+    const BOTTOM_COSTS = {
+      arenaGap: ARENA_ACTION_GAP,
+      action: actionBtnH,
+      gap1: GAP1,
+      filter: filterH,
+      gap2: GAP2,
+      inv: invRowStep * 2,
+      sbPeg,
+    };
+    const bottomFixed = BOTTOM_COSTS.arenaGap + BOTTOM_COSTS.action + BOTTOM_COSTS.gap1 + BOTTOM_COSTS.filter
+                      + BOTTOM_COSTS.gap2 + BOTTOM_COSTS.inv + BOTTOM_COSTS.sbPeg;
+    // Arena 上限：W 的 72%（大屏放大不再死卡 284），但至少 210
+    const arenaDiameterMaxW = Math.min(W - 48, Math.max(284, Math.floor(W * 0.72)));
+
+    // ==========================================================
+    // 区域 3 · Arena（合成台）— 大圆盘严格在Tab行底部和操作按钮行顶部的中间位置
+    // 先固定操作按钮位置（基于底部预算），再计算中间位置
+    // ==========================================================
+    const minArenaY = titleY + titleH + titleArenaGap;
+    const maxArenaBottom = H - SB - bottomFixed;
+    // 直径上限收为「可用高度 - 2×呼吸间距」，圆盘居中后上下各留 ≥ ARENA_BREATH 的空隙（不再贴 tab 行与操作行）
+    const arenaH = Math.max(minArenaH, Math.min(maxArenaBottom - minArenaY - 2 * ARENA_BREATH, arenaDiameterMaxW));
+    const arenaR = arenaH / 2;
+    const arenaCx = W / 2;
+    // Tab行底部 = tabY + titleTabH
+    const tabBottom = tabY + titleTabH;
+    // 操作按钮行顶部（基于底部预算固定，不依赖arenaY），恢复到原始位置（上移20px在手机屏幕上不行）
+    const actionYFixed = H - SB - (ARENA_ACTION_GAP + actionBtnH + GAP1 + filterH + GAP2 + invRowStep * 2 + sbPeg);
+    // 大圆盘中心 = Tab行底部和操作按钮行顶部的中间位置
+    const arenaCy = (tabBottom + actionYFixed) / 2;
+    const arenaY = arenaCy - arenaR;
+
+    // 反推 slotR 与 d，保证三槽不越界；目标 slotR 越大越好（≥24）
+    const availForSlots = arenaR - 4;
+    let slotR = Math.max(24, Math.floor((availForSlots - 3.46) / 2.155));
+    let slotD = slotR * 2 + 6;
+    let slotCircum = slotD * Math.sqrt(3) / 3;
+    if (slotCircum + slotR + 3 > arenaR) {
+      slotR = Math.max(20, slotR - 2);
+      slotD = slotR * 2 + 6;
+      slotCircum = slotD * Math.sqrt(3) / 3;
+    }
+    const slotAngles = [-Math.PI / 2, Math.PI / 6, Math.PI * 5 / 6];
+
+    // ==========================================================
+    // 区域 4 · ActionBar — 操作按钮位置固定（基于底部预算），不依赖于大圆盘位置
+    // ==========================================================
+    const actionY = actionYFixed;
+
+    // ==========================================================
+    // 区域 5 · FilterBar
+    // ==========================================================
+    const filterY = actionY + actionBtnH + BOTTOM_COSTS.gap1;
+
+    // ==========================================================
+    // 区域 6 · Inventory — 最多 2 行显示（用户要求：三行改成两行）
+    // ==========================================================
+    const invY = filterY + filterH + BOTTOM_COSTS.gap2;
+    const invMaxBottom = H - SB - BOTTOM_COSTS.sbPeg;
+    const rowsMax = Math.max(2, Math.min(2, Math.floor((invMaxBottom - invY + invGap) / invRowStep)));
+    const invStartX = (W - (invCols * invCell + (invCols - 1) * invGap)) / 2;
+
+    // ==========================================================
+    // 过滤器预算：右侧"抽取"宽度按屏自适应，过滤器用全名优先（5 字不切）
+    // 临界 375：右抽取=68，gap*5=32，leftPad+rightReserve=16+82=98，avail=375-98-32=245 → 每格 49
+    // 49px × 5 字中文 · 字号 11，能放全名（实测 11px 中文宽 ~13，"普通"26，剩余 23 气隙 ✓）
+    // ==========================================================
+    const drawBtnW = compact ? 68 : 76;
+    const rightReserve = drawBtnW + (compact ? 10 : 14);
+
+    // ==========================================================
+    // 图鉴：品质标签单独一行（上面），陀螺图标单独一行（下面），5个陀螺占满整个宽度并放大
+    // 每个品质占用两行：品质标签行 + 陀螺行
+    // 右端严格等式：gridStartX(12) + 5*codexCell + 4*codexGap + codexRightPad == W
+    // 顶部内容（标题/进度条/横幅）增加呼吸感，codexStartY 额外+40（整个陀螺区域再往下移5px）
+    // ==========================================================
+    const codexStartY = titleY + titleH + 40;
+    const codexUsableBottom = H - SB - 12;
+    // 每个品质两行（品质标签+陀螺），行高最小值68px（原72→68，再收缩一点）
+    const codexRowH = Math.max(68, Math.floor((codexUsableBottom - codexStartY) / TIERS.length));
+    const codexLabelW = 0;                         // 品质标签在上面，不占用水平空间
+    const codexLeftPad  = 12;                       // gridStartX 在 drawCodex 里是 12，这里对齐
+    const codexRightPad = 12;
+    const codexGap = 8;
+    // 5个陀螺占满整个宽度（不再有品质标签区域）
+    const avail = W - codexLeftPad - (4 * codexGap) - codexRightPad;
+    const codexCell = Math.max(36, Math.floor(avail / 5));
+    const codexGridStartX = codexLeftPad;           // 从左边开始，5个陀螺占满
+    const codexGridRight = codexGridStartX + 5 * codexCell + 4 * codexGap;
+    // 保险：如果浮点 floor 仍有 -1~1 的右越，再把 codexCell -1 回退
+    let codexCellFinal = codexCell;
+    if (codexGridRight + codexRightPad > W) {
+      codexCellFinal = Math.max(36, codexCell - 1);
+    }
+
+    this.layout = {
+      W, H, ST, SB, compact,
+      // 区域 1
+      topBarY, topBarH,
+      coinXEnd, energyX, energyW, rightXStart,
+      signBtnW, icoW, icoGap, leftPad, rightPad,
+      titleTitleSize, titleSubLineH,            // 给 drawTitleAndTabs 用
+      // 区域 1.5
+      subBarY, subBarH, subBtnH, subBtnGap,
+      subExists, hasRefill, hasAdE,
+      // 区域 2
+      titleY, titleH, tabY, tabW,
+      // 区域 3
+      arenaX: arenaCx - arenaR, arenaY, arenaW: arenaR * 2, arenaH, arenaCx, arenaCy, arenaR,
+      slotR, slotD, slotCircum, slotAngles,
+      // 区域 4
+      actionY, actionBtnH,
+      // 区域 5
+      filterY, filterH, drawBtnW, rightReserve,
+      // 区域 6
+      invY, invMaxBottom, invCols, invGap, invCell, invStartX, invRowsMax: rowsMax, invRowStep,
+      // 图鉴
+      codexStartY, codexRowH, codexLabelW, codexLeftPad, codexRightPad, codexGap, codexCell: codexCellFinal, codexGridStartX,
+      // 给开发校验用：bottom 预算 / arena 预算
+      _bottomFixed: bottomFixed,
+      _arenaBudget: maxArenaBottom - minArenaY,
+    };
+  }
+
+  resize(w, h) {
+    this.width = w; this.height = h;
+    this.canvas.width = w; this.canvas.height = h;
+    this._reflow();
+    this._layoutSig = this._curSig();
+  }
+
+  /** 布局依赖的运行时状态签名（canvas 尺寸 + SubBar 折叠相关状态） */
+  _curSig() {
+    const g = this.game;
+    return (this.width + 'x' + this.height + 'x' + this.safeTop + 'x' + this.safeBottom
+      + 'x' + (g.energy < g.maxEnergy) + 'x' + g.maxEnergy
+      + 'x' + (!!(g.canRefill && g.canRefill()))
+      + 'x' + (!!(g.canWatchAdEnergy && g.canWatchAdEnergy())));
+  }
+
+  /** 低端档判定：默认小屏 compact；game.lowFX 可强制覆盖（0=省电关闭软投影，1=全特效） */
+  _updateFx() {
+    let low = !!(this.layout && this.layout.compact);
+    if (this.game && this.game.lowFX !== undefined) low = !!this.game.lowFX;
+    // MID 档也关装饰软投影（中端机同样吃不起每帧 shadowBlur，只保留触摸按下反馈）
+    else if (this.perfLevel === 'MID') low = true;
+    // HIGH 档 Android 旗舰（如 Xiaomi 13 实测 21fps）同样吃不起装饰阴影：只留触摸反馈，砍每帧模糊
+    else if (this.perfLevel === 'HIGH' && !this._isIOS) low = true;
+    // iOS：WebKit 软渲染阴影无 GPU 加速，大屏高配同样昂贵 → 装饰阴影强制关闭（P1 主因）
+    this.shadowScale = (low || this._isIOS) ? 0 : 1;
+    // 按下态阴影：仅当用户显式关闭特效(lowFX===0)才关，否则始终保留触摸反馈
+    this.pressShadow = (this.game && this.game.lowFX === 0) ? 0 : 1;
+  }
+
+  /** 仅当底部预算依赖状态变化时才重算布局，避免每帧全量计算（纯 CPU 浪费，拖累 FPS） */
+  _maybeReflow() {
+    this._updateFx();
+    const sig = this._curSig();
+    if (sig === this._layoutSig) return;
+    this._reflow();
+    this._layoutSig = sig;
+  }
+
+  /** 高频渐变缓存：按几何键缓存渐变对象，避免每帧 createLinearGradient/RadialGradient 分配 */
+  _grad(key, create) {
+    let g = this._gradCache[key];
+    if (!g) {
+      g = create();
+      this._gradCache[key] = g;
+    }
+    return g;
+  }
+
+  _shadeColor(hex, amt) {
+    const h = (hex || '#888888').replace('#', '');
+    let r = parseInt(h.substring(0, 2), 16) || 0;
+    let g = parseInt(h.substring(2, 4), 16) || 0;
+    let b = parseInt(h.substring(4, 6), 16) || 0;
+    r = Math.max(0, Math.min(255, Math.round(r + (amt > 0 ? (255 - r) : r) * amt)));
+    g = Math.max(0, Math.min(255, Math.round(g + (amt > 0 ? (255 - g) : g) * amt)));
+    b = Math.max(0, Math.min(255, Math.round(b + (amt > 0 ? (255 - b) : b) * amt)));
+    const toHex = (n) => (n < 16 ? '0' : '') + n.toString(16);
+    return '#' + toHex(r) + toHex(g) + toHex(b);
+  }
+
+  /** 十六进制颜色转RGB，用于计算亮度自适应文字色 */
+  _hexToRgb(hex) {
+    const h = (hex || '#888888').replace('#', '');
+    return {
+      r: parseInt(h.substring(0, 2), 16) || 0,
+      g: parseInt(h.substring(2, 4), 16) || 0,
+      b: parseInt(h.substring(4, 6), 16) || 0
+    };
+  }
+
+  trackPressedBtn(rect) { this.pressedBtn = { rect, t0: Date.now() }; }
+  releasePressedBtn() { this.pressedBtn = null; }
+
+  /** 命中点所在按钮 → 触发按下态（供 input 在按下瞬间调用） */
+  pressAt(x, y) {
+    let rect = null;
+    for (const b of this.buttons) {
+      if (isPointInRect(x, y, b)) { rect = b; break; }
+    }
+    if (!rect) {
+      for (const m of this.modalRects) {
+        if (isPointInRect(x, y, m)) { rect = m; break; }
+      }
+    }
+    if (rect) this.trackPressedBtn(rect);
+  }
+
+  clear() { this.ctx.clearRect(0, 0, this.width, this.height); }
+
+  /** 首帧极简画面：背景 + 居中副标题（渲染最轻，保证像素立刻上屏，降低首屏渲染耗时） */
+  drawSplashTitle() {
+    const ctx = this.ctx;
+    const W = this.width;
+    const L = this.layout;
+    const ty = (L && typeof L.titleY === 'number') ? L.titleY : this.height * 0.3;
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'top';
+    ctx.fillStyle = 'rgba(209,196,233,0.9)';
+    ctx.font = '13px ' + APPLE_FONT;
+    ctx.fillText('收集 · 合成 · 对战', W / 2, ty);
+  }
+
+  /**
+   * 静态背景（渐变 + 星星）：首次渲染到离屏画布缓存，之后每帧仅一次 drawImage。
+   * 大幅降低每帧 createLinearGradient + 26 个 arc 的绘制指令（诊断 drawcall 178 的主因之一）。
+   * 离屏创建失败时自动回退为逐帧绘制，保证兼容性（微信小游戏 / 老基础库）。
+   */
+  _getBgCache() {
+    const key = this.width + 'x' + this.height;
+    if (this._bgCache && this._bgCacheKey === key) return this._bgCache;
+    if (!this._bgCache || this._bgCacheKey !== key) {
+      try {
+        let bg = null;
+        // 优先离屏画布（不抢主屏 buffer）；微信用 createOffscreenCanvas，浏览器用 document，
+        // 避免 wx.createCanvas()（真机/预览均可能共享主画布，用作缓存源会冲突）。
+        if (typeof wx !== 'undefined' && wx.createOffscreenCanvas && typeof wx.createOffscreenCanvas === 'function') {
+          bg = wx.createOffscreenCanvas({ width: this.width, height: this.height });
+        } else if (typeof document !== 'undefined' && document.createElement) {
+          bg = document.createElement('canvas');
+        }
+        if (!bg || !bg.getContext) { this._bgCache = null; return null; }
+        bg.width = this.width;
+        bg.height = this.height;
+        const bctx = bg.getContext('2d');
+        if (!bctx) { this._bgCache = null; return null; }
+        const grad = bctx.createLinearGradient(0, 0, 0, this.height);
+        grad.addColorStop(0, '#2a1b4e');
+        grad.addColorStop(1, '#1a0f33');
+        bctx.fillStyle = grad;
+        bctx.fillRect(0, 0, this.width, this.height);
+        bctx.fillStyle = '#ffffff';
+        for (const st of this.stars) {
+          bctx.globalAlpha = st.a;
+          bctx.beginPath();
+          bctx.arc(st.rx * this.width, st.ry * this.height, st.s, 0, Math.PI * 2);
+          bctx.fill();
+        }
+        bctx.globalAlpha = 1;
+        this._bgCache = bg;
+        this._bgCacheKey = key;
+        return bg;
+      } catch (e) {
+        this._bgCache = null;
+        return null;
+      }
+    }
+    return this._bgCache;
+  }
+
+  drawBackground() {
+    const bg = this._getBgCache();
+    if (bg) {
+      try {
+        this.ctx.drawImage(bg, 0, 0, this.width, this.height);
+        return;
+      } catch (e) {
+        this._bgCache = null; // 回退逐帧绘制
+      }
+    }
+    // 回退：无离屏缓存能力时逐帧绘制（保证兼容）
+    const ctx = this.ctx;
+    const grad = this._grad('bgfallback', () => {
+      const gg = ctx.createLinearGradient(0, 0, 0, this.height);
+      gg.addColorStop(0, '#2a1b4e');
+      gg.addColorStop(1, '#1a0f33');
+      return gg;
+    });
+    ctx.fillStyle = grad;
+    ctx.fillRect(0, 0, this.width, this.height);
+    ctx.fillStyle = '#ffffff';
+    for (const st of this.stars) {
+      const x = st.rx * this.width;
+      const y = st.ry * this.height;
+      ctx.globalAlpha = st.a;
+      ctx.beginPath();
+      ctx.arc(x, y, st.s, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    ctx.globalAlpha = 1;
+  }
+
+  // =====================================================
+  // 区域 1 · TopBar（左金币 / 中能量条 / 右图标组） + 区域 1.5 SubBar（回满/广告）
+  // 左右先占位、中间弹性夹 —— 严格按 _reflow 预计算值，绝不 375 越界。
+  // =====================================================
+  drawHeader() {
+    const ctx = this.ctx;
+    const L = this.layout;
+    const y = L.topBarY;
+    const icoH = Math.min(34, L.topBarH - 4);
+
+    // ----- 左 · 金币（半透明胶囊底 + 圆形图标 + 金色数字，与设计稿 topbar 一致）-----
+    // 金币模块高度和签到/音量图标一致（icoH=34），避免左边小右边大
+    const coinIcon = 20, coinGap = 6, coinPad = 12, coinH = icoH;
+    const coinTxt = formatNumber(this.game.coins);
+    // P2-4：先按金币实际绘制字体测量宽度，否则沿用上一帧残留字体导致 coinW 计算错误
+    ctx.font = 'bold 15px ' + APPLE_FONT;
+    const coinTxtW = Math.ceil(mtW(ctx, coinTxt));
+    const coinW = coinPad * 2 + coinIcon + coinGap + coinTxtW;
+    const coinX = L.leftPad, coinY = y + (L.topBarH - coinH) / 2, coinCy = coinY + coinH / 2;
+    ctx.save();
+    ctx.shadowColor = 'rgba(0,0,0,0.28)';
+    ctx.shadowBlur = 4 * this.shadowScale;
+    ctx.fillStyle = 'rgba(0,0,0,0.38)';
+    ctx.strokeStyle = 'rgba(255,255,255,0.18)';
+    ctx.lineWidth = 1;
+    this.roundRect(coinX, coinY, coinW, coinH, coinH / 2); ctx.fill(); ctx.stroke();
+    ctx.shadowBlur = 0;
+    // 圆形图标：先裁圆再画 PNG（icon-coin 底为方形，clip 成圆形与设计稿一致）
+    const coinIc = coinX + coinPad + coinIcon / 2;
+    ctx.beginPath(); ctx.arc(coinIc, coinCy, coinIcon / 2, 0, Math.PI * 2); ctx.clip();
+    if (!this._drawPngIcon('coin', coinIc, coinCy, coinIcon)) drawVectorIcon(ctx, 'coin', coinIc, coinCy, coinIcon, '#FFD700');
+    ctx.restore();
+    ctx.fillStyle = '#ffd54f';
+    ctx.font = 'bold 15px ' + APPLE_FONT;
+    ctx.textAlign = 'left';
+    ctx.textBaseline = 'middle';
+    ctx.shadowColor = 'rgba(255,143,0,0.35)';
+    ctx.shadowBlur = 6 * this.shadowScale;
+    ctx.fillText(coinTxt, coinIc + coinIcon / 2 + coinGap, coinCy);
+    ctx.shadowBlur = 0;
+
+    // ----- 中 · 能量条（游戏化：分段+发光+低能量警告+流动光效）-----
+    const energyH = 16;
+    const ex = L.energyX;
+    const ew = L.energyW;
+    const ey = y + (L.topBarH - energyH) / 2;
+    const p = Math.max(0, Math.min(1, this.game.energy / this.game.maxEnergy));
+    const lowEnergy = p < 0.3;  // 低能量警告阈值
+    ctx.save();
+    // 外发光（游戏体力条效果，低能量红色警告，正常时紫色主题光）
+    ctx.shadowColor = lowEnergy ? 'rgba(255,82,82,0.6)' : 'rgba(126,87,194,0.6)';
+    ctx.shadowBlur = 6 * this.shadowScale;
+    // 背景：深色半透明 + 内阴影感
+    ctx.fillStyle = 'rgba(20,10,40,0.85)';
+    this.roundRect(ex, ey, ew, energyH, energyH / 2); ctx.fill();
+    ctx.shadowBlur = 0;
+    // 填充：渐变（低能量时红色警告，正常时彩虹多彩渐变）
+    if (p > 0) {
+      const fillW = Math.max(energyH - 2, (ew - 2) * p);
+      const pg = this._grad('energyG|' + ex + '|' + ey + '|' + ew + '|' + (lowEnergy ? 'low' : 'rainbow'), () => {
+        const g0 = ctx.createLinearGradient(ex, ey, ex + ew, ey);
+        if (lowEnergy) {
+          g0.addColorStop(0, '#ff5252');
+          g0.addColorStop(1, '#ff8a80');
+        } else {
+          // 彩虹多彩渐变：红→橙→黄→绿→蓝→紫
+          g0.addColorStop(0, '#ff5252');
+          g0.addColorStop(0.2, '#ff9800');
+          g0.addColorStop(0.4, '#ffeb3b');
+          g0.addColorStop(0.6, '#00e676');
+          g0.addColorStop(0.8, '#2196f3');
+          g0.addColorStop(1, '#9c27b0');
+        }
+        return g0;
+      });
+      ctx.fillStyle = pg;
+      this.roundRect(ex + 1, ey + 1, fillW, energyH - 2, (energyH - 2) / 2); ctx.fill();
+      // 流动高光（游戏能量条回能动效）
+      const flowT = (Date.now() / 1500) % 1;
+      const flowX = ex + 1 + fillW * flowT - 20;
+      if (flowX > ex + 1 && flowX < ex + 1 + fillW - 10) {
+        const flowGrad = ctx.createLinearGradient(flowX, ey, flowX + 20, ey);
+        flowGrad.addColorStop(0, 'rgba(255,255,255,0)');
+        flowGrad.addColorStop(0.5, 'rgba(255,255,255,0.45)');
+        flowGrad.addColorStop(1, 'rgba(255,255,255,0)');
+        ctx.fillStyle = flowGrad;
+        ctx.fillRect(flowX, ey + 2, 20, energyH - 4);
+      }
+    }
+    // 分段线（4段，游戏体力条效果）
+    ctx.strokeStyle = 'rgba(0,0,0,0.35)';
+    ctx.lineWidth = 1;
+    for (let i = 1; i < 4; i++) {
+      const segX = ex + (ew / 4) * i;
+      ctx.beginPath();
+      ctx.moveTo(segX, ey + 2);
+      ctx.lineTo(segX, ey + energyH - 2);
+      ctx.stroke();
+    }
+    // 边框：游戏感金属边框
+    ctx.strokeStyle = lowEnergy ? 'rgba(255,138,128,0.7)' : 'rgba(255,255,255,0.45)';
+    ctx.lineWidth = 1;
+    this.roundRect(ex + 0.5, ey + 0.5, ew - 1, energyH - 1, energyH / 2 - 0.5); ctx.stroke();
+    // 顶部高光（坐标恒定，走 _grad 缓存，避免每帧新建渐变）
+    const hlGrad = this._grad('energyHl|' + ex + '|' + ey + '|' + energyH, () => {
+      const g = ctx.createLinearGradient(ex, ey, ex, ey + energyH / 2);
+      g.addColorStop(0, 'rgba(255,255,255,0.25)');
+      g.addColorStop(1, 'rgba(255,255,255,0)');
+      return g;
+    });
+    ctx.fillStyle = hlGrad;
+    this.roundRect(ex + 1, ey + 1, ew - 2, energyH / 2 - 1, (energyH - 2) / 2); ctx.fill();
+    // 文字：白色 + 深色描边 + 阴影（确保满格浅绿色背景上也清晰可见）
+    if (lowEnergy) {
+      const warnPulse = 0.6 + 0.4 * Math.sin(Date.now() / 300);
+      ctx.globalAlpha = warnPulse;
+    }
+    ctx.font = 'bold 10px ' + APPLE_FONT;
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    // 深色描边（确保任何背景下文字都清晰）
+    ctx.strokeStyle = 'rgba(20,10,40,0.85)';
+    ctx.lineWidth = 2.5;
+    ctx.strokeText(Math.floor(this.game.energy) + '/' + this.game.maxEnergy, ex + ew / 2, ey + energyH / 2 + 0.5);
+    // 白色填充
+    ctx.fillStyle = '#ffffff';
+    ctx.shadowColor = 'rgba(0,0,0,0.5)';
+    ctx.shadowBlur = 1.5;
+    ctx.fillText(Math.floor(this.game.energy) + '/' + this.game.maxEnergy, ex + ew / 2, ey + energyH / 2 + 0.5);
+    ctx.shadowBlur = 0;
+    ctx.globalAlpha = 1;
+    ctx.restore();
+
+    // ----- 右 · 图标组：按 _reflow 好的 rightXStart 从左往右排，保证整体对齐右边界 -----
+    let gx = L.rightXStart;
+    const canSignNow = this.game.canSign && this.game.canSign();
+    // 签到宽度（可领取时稍微宽一点点带金边，否则按 signBtnW=52 保持不变）
+    const signW = canSignNow ? Math.max(L.signBtnW, 52) : L.signBtnW;
+    const signRect = { x: gx, y: y + (L.topBarH - icoH) / 2, w: signW, h: icoH, action: 'signin' };
+    gx += signW + L.icoGap;
+    const muteRect = { x: gx, y: y + (L.topBarH - icoH) / 2, w: L.icoW, h: icoH, action: 'mute' };
+    gx += L.icoW + L.icoGap;
+
+    // 签到：图标胶囊（icon-sign.png，设计稿无文字），可领取时金色脉冲边
+    this.drawIconButton(signRect, 'sign');
+    if (canSignNow) {
+      const pulse = 0.5 + 0.5 * Math.sin(Date.now() / 200);
+      ctx.strokeStyle = '#ffd54f';
+      ctx.globalAlpha = 0.55 + 0.35 * pulse;
+      ctx.lineWidth = 2;
+      this.roundRect(signRect.x - 2, signRect.y - 2, signRect.w + 4, signRect.h + 4, 12);
+      ctx.stroke();
+      ctx.globalAlpha = 1;
+    }
+    this.buttons.push(signRect);
+    this.drawIconButton(muteRect, this.audio && this.audio.muted ? 'mute' : 'unmute');
+    this.buttons.push(muteRect);
+
+    // ----- 胶囊左侧手柄入口 · 更多小游戏（同一行，紧贴胶囊）-----
+    // P2-8：仅在 config.js 配好 moreGamesOpenlink 时才渲染，未配置则不出现，
+    // 避免出现"点了只弹敬请期待"的死按钮（与 club 按钮判定一致）。
+    const mb = this.menuBtn;
+    if (mb && mb.width > 0) {
+      const mh = Math.min(36, Math.max(24, mb.height));
+      const mr = Math.min(11, mh / 2 - 1);
+      const mtop = mb.top + Math.round((mb.height - mh) / 2);
+      // anchorLeft 为下一个入口的起始 x（默认紧贴胶囊左侧一个身位）
+      let anchorLeft = mb.left - 10 - mh;
+      if (CONFIG.moreGamesOpenlink) {
+        const mRect = { x: anchorLeft, y: mtop, w: mh, h: mh, action: 'moregames' };
+        // P2-3：与 drawIconButton 同款按下态（缩放 + 高亮）
+        const sameRect = (a, b) => a && b && Math.abs(a.x - b.x) < 0.01 && Math.abs(a.y - b.y) < 0.01 && Math.abs(a.w - b.w) < 0.01 && Math.abs(a.h - b.h) < 0.01;
+        const mPressed = sameRect(this.pressedBtn && this.pressedBtn.rect, mRect);
+        const mNowT = mPressed ? (Date.now() - this.pressedBtn.t0) : 0;
+        const mPressT = mPressed && mNowT < 180 ? (1 - Math.pow(1 - mNowT / 180, 3)) : (mPressed ? 1 : 0);
+        const mcx = mRect.x + mRect.w / 2, mcy = mRect.y + mRect.h / 2;
+        ctx.save();
+        ctx.translate(mcx, mcy); ctx.scale(1 - mPressT * 0.08, 1 - mPressT * 0.08); ctx.translate(-mcx, -mcy);
+        ctx.shadowColor = 'rgba(255,213,79,0.35)';
+        ctx.shadowBlur = 6 * this.shadowScale;
+        ctx.fillStyle = mPressed ? 'rgba(40,24,80,0.8)' : 'rgba(20,10,44,0.66)';
+        ctx.strokeStyle = mPressed ? 'rgba(255,213,79,0.85)' : 'rgba(255,213,79,0.55)';
+        ctx.lineWidth = 1;
+        this.roundRect(mRect.x, mRect.y, mRect.w, mRect.h, mr); ctx.fill(); ctx.stroke();
+        ctx.restore();
+        const mpad = Math.max(4, mRect.h * 0.16);
+        const mis = mRect.h - mpad * 2;
+        if (!this._drawPngIcon('more', mRect.x + mRect.w / 2, mRect.y + mRect.h / 2, mis)) {
+          drawVectorIcon(ctx, 'more', mRect.x + mRect.w / 2, mRect.y + mRect.h / 2, mis, '#ffffff');
+        }
+        this.buttons.push(mRect);
+        anchorLeft = mRect.x - 8 - mh;   // club 紧贴 moregames 左侧
+      }
+
+      // ----- 胶囊左侧手柄入口 · 游戏圈/社区（流量主条件二 · 有效活跃）-----
+      // 仅在 config.js 配好 gameClubOpenlink 时才渲染：未配置就不出现，
+      // 避免出现"点了没反应"的死按钮（也是之前玩家能看到"请先在后台配置"的根因）。
+      // 位置：moregames 左侧一个身位（未配置 moregames 时则紧贴胶囊）。
+      if (CONFIG.gameClubOpenlink) {
+        const cRect = { x: anchorLeft, y: mtop, w: mh, h: mh, action: 'club' };
+        if (cRect.x > 16) {   // 越界兜底：极端窄屏直接不画，绝不顶出屏幕
+          ctx.save();
+          ctx.shadowColor = 'rgba(255,213,79,0.35)';
+          ctx.shadowBlur = 6 * this.shadowScale;
+          ctx.fillStyle = 'rgba(20,10,44,0.66)';
+          ctx.strokeStyle = 'rgba(255,213,79,0.55)';
+          ctx.lineWidth = 1;
+          this.roundRect(cRect.x, cRect.y, cRect.w, cRect.h, mr); ctx.fill(); ctx.stroke();
+          ctx.restore();
+          const cpad = Math.max(4, cRect.h * 0.16);
+          const cis = cRect.h - cpad * 2;
+          // 无 icon-club.png，直接走矢量气泡（utils.js drawVectorIcon 'club'）
+          drawVectorIcon(ctx, 'club', cRect.x + cRect.w / 2, cRect.y + cRect.h / 2, cis, '#ffffff');
+          this.buttons.push(cRect);
+        }
+      }
+    }
+
+    // ----- 区域 1.5 · SubBar：免费回满 / 广告+60 独立一行（按 layout.subExists 决定是否渲染，避免空行）-----
+    if (L.subExists) {
+      const subY = L.subBarY;
+      const smallBtnH = L.subBtnH;
+      const smallBtnW = 84;
+      let sx = L.leftPad;
+      if (this.game.energy < this.game.maxEnergy && this.game.canRefill && this.game.canRefill()) {
+        const rfRect = { x: sx, y: subY, w: smallBtnW, h: smallBtnH, action: 'refill' };
+        this.drawButton(rfRect.x, rfRect.y, rfRect.w, rfRect.h, '免费回满', '#66bb6a');
+        this.buttons.push(rfRect);
+        sx += smallBtnW + L.subBtnGap;
+      }
+      if (this.game.canWatchAdEnergy && this.game.canWatchAdEnergy()) {
+        const adRect = { x: sx, y: subY, w: smallBtnW, h: smallBtnH, action: 'adenergy' };
+        this.drawButton(adRect.x, adRect.y, adRect.w, adRect.h, '广告 +60', '#ffb300');
+        this.buttons.push(adRect);
+      }
+      // 批次D·好友助力入口（play-design v1）：subBar 行右侧（避胶囊/刘海）
+      const boostW = 64;
+      const boostX = L.W - 16 - boostW;
+      const boostRect = { x: boostX, y: subY, w: boostW, h: smallBtnH, action: 'boost_open' };
+      ctx.fillStyle = 'rgba(49,27,146,0.78)';
+      this.roundRect(boostX, subY, boostW, smallBtnH, smallBtnH / 2); ctx.fill();
+      ctx.strokeStyle = 'rgba(255,213,79,0.55)'; ctx.lineWidth = 1;
+      this.roundRect(boostX + 0.5, subY + 0.5, boostW - 1, smallBtnH - 1, smallBtnH / 2 - 0.5); ctx.stroke();
+      this._drawPngIcon('share', boostX + 13, subY + smallBtnH / 2, 15);
+      ctx.fillStyle = '#ffd54f';
+      ctx.font = 'bold 11px ' + APPLE_FONT;
+      ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
+      ctx.fillText('助力', boostX + 24, subY + smallBtnH / 2 + 0.5);
+      this.buttons.push(boostRect);
+    }
+  }
+
+  // =====================================================
+  // 区域 2 · 标题 + 副标题 + Tab（严格按 _reflow 累加位置绘制）
+  //  SE 紧凑版：titleTitleSize=24 / subLineH=16 / 气隙各 -2 → 总体 -26
+  //  公式（从 titleY 起）：
+  //    +titleInnerHeadGap(=2)
+  //    +titleTitleSize
+  //    +titleSubGap(=4 or 6)
+  //    +titleSubLineH
+  //    +titleTabGap(=4 or 6)
+  //    +titleTabH(=28)
+  //    +titleFootGap(=2)
+  // =====================================================
+  drawTitleAndTabs() {
+    const ctx = this.ctx;
+    const L = this.layout;
+    const W = L.W;
+    const ty = L.titleY;
+    const isCompact = L.compact || false;
+    const titleSubGap = isCompact ? 4 : 6;
+
+    // 副标题（动态，上移到原标题位置）：只在合成 tab 显示（图鉴 tab 有自己的"图鉴 x/y + 进度条"头部，避免重复遮挡）
+    // 页面内不再显示游戏名"陀螺大师"（需求：去除页面标题文字）
+    const subY = ty;
+    const pair = this._mergeablePair();
+    const mergeable = pair && pair.length > 0;
+    const codexProg = this.game.codexCount() + '/' + this.game.codexTotal();
+    // 限时活动横幅状态（play-design v1）：提前计算，供副标题让位与横幅绘制共用
+    let actActive = false, actFest = false, actTxt = '', actSub = '', actW2 = 84;
+    if (typeof this.game.activityInfo === 'function') {
+      const _act = this.game.activityInfo();
+      actActive = !!(_act.weekendDouble || _act.festival);
+      actFest = !!_act.festival;
+      actTxt = actFest ? (_act.festivalName + '') : '周末双倍';
+      actSub = actFest ? '抽卡掉落' : '金币×2';
+      actW2 = actFest ? 96 : 88;
+    }
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'top';
+    if (this.game.view === 'main') {
+      // 标题行四按钮统一布局：等间隙16px（和底部Tab一致），整体居中，不靠边
+      // 按钮顺序：竞技场(78) → 大师等级(72) → 周末双倍(74) → 每日任务(66)
+      const BTN_GAP = 16; // 和底部Tab间隙一致
+      const btnTotalW = actActive ? (78 + BTN_GAP + 72 + BTN_GAP + 74 + BTN_GAP + 66) : (78 + BTN_GAP + 72 + BTN_GAP + 66);
+      const btnStartX = Math.max(16, (W - btnTotalW) / 2); // 整体居中，最小边距16
+      let _btnX = btnStartX;
+      // 竞技场按钮x位置（后面绘制时用）
+      const arenaBtnX = _btnX; _btnX += 78 + BTN_GAP;
+      // 大师等级按钮x位置
+      const lvBtnX = _btnX; _btnX += 72 + BTN_GAP;
+      // 活动按钮x位置（如果显示）
+      const actBtnX = actActive ? _btnX : 0; if (actActive) _btnX += 74 + BTN_GAP;
+      // 每日任务按钮x位置
+      const taskBtnX = _btnX;
+
+      // 活动横幅存在时该行让位给横幅，副标题暂隐
+      // 四按钮统一布局：等间隙16px，整体居中
+      if (actActive) {
+        const actAW = 74;                    // 固定宽度，只是显示作用
+        const actX = actBtnX;                // 统一布局位置
+        if (actAW > 60) {
+          ctx.save();
+          const ag3 = this._grad('actT|' + Math.round(actX), () => {
+            const gg = ctx.createLinearGradient(actX, 0, actX + actAW, 0);
+            gg.addColorStop(0, 'rgba(255,82,82,0.92)');
+            gg.addColorStop(1, 'rgba(255,152,0,0.92)');
+            return gg;
+          });
+          ctx.fillStyle = ag3;
+          const ah = 30; // 高度统一：24→30
+          const ay = subY + Math.max(0, (L.titleTitleSize - ah) / 2); // y位置与其他按钮一致
+          this.roundRect(actX, ay, actAW, ah, ah / 2); ctx.fill();
+          ctx.strokeStyle = 'rgba(255,255,255,0.6)'; ctx.lineWidth = 1;
+          this.roundRect(actX + 0.5, ay + 0.5, actAW - 1, ah - 1, ah / 2 - 0.5); ctx.stroke();
+          ctx.fillStyle = '#fff';
+          ctx.font = 'bold 12px ' + APPLE_FONT; // 主文字调大：11→12
+          ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+          ctx.fillText(actTxt, actX + actAW / 2, ay + ah / 2 - 4);
+          ctx.fillStyle = '#ffd54f';
+          ctx.font = 'bold 10px ' + APPLE_FONT; // 副文字调大：8→10
+          ctx.fillText(actSub, actX + actAW / 2, ay + ah / 2 + 8);
+          ctx.restore();
+        }
+      } else {
+        // 标题行中间不显示收集进度（已移至合成台空状态显示，避免重复）
+      }
+      // 竞技场入口（play-design v1）：四按钮统一布局，等间隙16px整体居中
+      // 按钮高度统一：26→30，与其他按钮一致
+      if (typeof this.game.arenaMeta === 'function') {
+        const aMeta = this.game.arenaMeta();
+        const aBtnW = 78, aBtnH = 30;
+        const aBtnX = arenaBtnX, aBtnY = subY + Math.max(0, (L.titleTitleSize - aBtnH) / 2); // 统一布局位置
+        const isMaster = aMeta.tierIndex >= 5;
+        const aBtn = { x: aBtnX, y: aBtnY, w: aBtnW, h: aBtnH, action: 'arena' };
+        ctx.save();
+        if (isMaster) {
+          const t = (this._frameCount || 0) / 60;
+          ctx.shadowColor = '#ffd54f';
+          ctx.shadowBlur = (10 + 6 * Math.sin(t * 4)) * this.shadowScale;
+        }
+        ctx.fillStyle = 'rgba(49,27,146,0.78)';
+        this.roundRect(aBtnX, aBtnY, aBtnW, aBtnH, aBtnH / 2); ctx.fill();
+        ctx.strokeStyle = aMeta.tierColor || '#ffd54f';
+        ctx.lineWidth = 1.2;
+        this.roundRect(aBtnX + 0.6, aBtnY + 0.6, aBtnW - 1.2, aBtnH - 1.2, aBtnH / 2 - 0.6); ctx.stroke();
+        ctx.shadowBlur = 0;
+        this._drawPngIcon(aMeta.tierIcon, aBtnX + 13, aBtnY + aBtnH / 2, 18);
+        ctx.fillStyle = '#ffd54f';
+        ctx.font = 'bold 12px ' + APPLE_FONT;
+        ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
+        ctx.fillText(aMeta.tierName, aBtnX + 26, aBtnY + aBtnH / 2 + 0.5);
+        ctx.restore();
+        this.buttons.push(aBtn);
+      }
+      // 大师等级入口（play-design v1）：四按钮统一布局，等间隙16px整体居中
+      if (typeof this.game.levelMeta === 'function') {
+        const lm = this.game.levelMeta();
+        // 按钮调大：60x26 → 72x30，文字更清晰
+        const lvBtnW = 72, lvBtnH = 30;
+        const lvBtnY = subY + Math.max(0, (L.titleTitleSize - lvBtnH) / 2); // x用统一布局的lvBtnX
+        const lvBtn = { x: lvBtnX, y: lvBtnY, w: lvBtnW, h: lvBtnH, action: 'level' };
+        ctx.save();
+        ctx.fillStyle = 'rgba(49,27,146,0.78)';
+        this.roundRect(lvBtnX, lvBtnY, lvBtnW, lvBtnH, lvBtnH / 2); ctx.fill();
+        ctx.strokeStyle = 'rgba(255,213,79,0.65)';
+        ctx.lineWidth = 1.2;
+        this.roundRect(lvBtnX + 0.6, lvBtnY + 0.6, lvBtnW - 1.2, lvBtnH - 1.2, lvBtnH / 2 - 0.6); ctx.stroke();
+        // LV 徽章（大写，文字调大：9px → 11px）
+        ctx.fillStyle = '#ffd54f';
+        ctx.font = 'bold 11px ' + APPLE_FONT;
+        ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+        ctx.fillText('LV', lvBtnX + 17, lvBtnY + lvBtnH / 2);
+        // 等级数字（调大：13px → 15px，位置右移）
+        ctx.font = 'bold 15px ' + APPLE_FONT;
+        ctx.fillText(String(lm.level), lvBtnX + 34, lvBtnY + lvBtnH / 2 + 0.5);
+        // 迷你经验条（按钮底部）
+        const mp = Math.max(0, Math.min(1, lm.inLv / Math.max(1, lm.need)));
+        ctx.fillStyle = 'rgba(255,255,255,0.2)';
+        this.roundRect(lvBtnX + 10, lvBtnY + lvBtnH - 6, lvBtnW - 20, 3.5, 1.75); ctx.fill();
+        if (mp > 0) {
+          ctx.fillStyle = '#00e676';
+          this.roundRect(lvBtnX + 10, lvBtnY + lvBtnH - 6, (lvBtnW - 20) * mp, 3.5, 1.75); ctx.fill();
+        }
+        ctx.restore();
+        this.buttons.push(lvBtn);
+      }
+      // 每日任务入口（play-design v1）：四按钮统一布局，等间隙16px整体居中
+      // 按钮高度统一：26→30，与其他按钮一致
+      const tBtnW = 66, tBtnH = 30;
+      const tBtnX = taskBtnX; // 统一布局位置
+      const tBtnY = subY + Math.max(0, (L.titleTitleSize - tBtnH) / 2);
+      const dailyBtn = { x: tBtnX, y: tBtnY, w: tBtnW, h: tBtnH, action: 'daily' };
+      ctx.save();
+      const dg = this._grad('dbtn|' + Math.round(tBtnX) + '|' + Math.round(tBtnY), () => {
+        const g0 = ctx.createLinearGradient(tBtnX, tBtnY, tBtnX, tBtnY + tBtnH);
+        g0.addColorStop(0, '#ffd54f');
+        g0.addColorStop(1, '#ffb300');
+        return g0;
+      });
+      ctx.fillStyle = dg;
+      this.roundRect(tBtnX, tBtnY, tBtnW, tBtnH, tBtnH / 2); ctx.fill();
+      ctx.strokeStyle = 'rgba(255,255,255,0.55)';
+      ctx.lineWidth = 1;
+      this.roundRect(tBtnX + 0.5, tBtnY + 0.5, tBtnW - 1, tBtnH - 1, tBtnH / 2 - 0.5); ctx.stroke();
+      this._drawPngIcon('task', tBtnX + 13, tBtnY + tBtnH / 2, 16);
+      ctx.fillStyle = '#4a2a0a';
+      ctx.font = 'bold 13px ' + APPLE_FONT;
+      ctx.textAlign = 'left';
+      ctx.textBaseline = 'middle';
+      ctx.fillText('任务', tBtnX + 25, tBtnY + tBtnH / 2 + 0.5);
+      ctx.restore();
+      this.buttons.push(dailyBtn);
+    }
+    // 图鉴 tab：页头留空，drawCodex 自带"图鉴 x/y + 进度条"头部
+
+    // Tab：_reflow 已按累加算出 tabY / tabW（tabY 已扣 titleTabGap）
+    const tabY = L.tabY;
+    const tabH = 28;
+    const tabW = L.tabW;
+    const tabGap = 16;
+    const tabsTotal = tabW * 2 + tabGap;
+    const tabStartX = (W - tabsTotal) / 2;
+    const tabMain   = { x: tabStartX,              y: tabY, w: tabW, h: tabH, view: 'main',  name: '合成', icon: 'merge' };
+    const tabCodex  = { x: tabStartX + tabW + tabGap, y: tabY, w: tabW, h: tabH, view: 'codex', name: '图鉴', icon: 'codex' };
+    this.drawTab(tabMain, this.game.view === 'main');
+    this.drawTab(tabCodex, this.game.view === 'codex');
+    this.tabRects = [tabMain, tabCodex];
+  }
+
+  // =====================================================
+  // 区域 3 · Arena（合成台）— 三槽等边三角排布，严格不越圆盘
+  // =====================================================
+  drawPlatform() {
+    const ctx = this.ctx;
+    const L = this.layout;
+    const cx = L.arenaCx, cy = L.arenaCy, r = L.arenaR;
+    this.platformRects.length = 0;
+
+    // 游戏化装饰：外层旋转装饰环（合成装置感）
+    ctx.save();
+    ctx.translate(cx, cy);
+    const ringT = Date.now() / 4000;  // 缓慢旋转
+    ctx.rotate(ringT);
+    ctx.strokeStyle = 'rgba(255,213,79,0.25)';
+    ctx.lineWidth = 1.5;
+    ctx.setLineDash([12, 8, 4, 8]);
+    ctx.beginPath();
+    ctx.arc(0, 0, r + 20, 0, Math.PI * 2);
+    ctx.stroke();
+    ctx.setLineDash([]);
+    // 四个方位装饰点
+    for (let i = 0; i < 4; i++) {
+      const ang = (i / 4) * Math.PI * 2;
+      const dx = Math.cos(ang) * (r + 20);
+      const dy = Math.sin(ang) * (r + 20);
+      ctx.fillStyle = 'rgba(255,213,79,0.5)';
+      ctx.beginPath();
+      ctx.arc(dx, dy, 3, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    ctx.restore();
+
+    // 底板（放射渐变 + 双圈金边）
+    ctx.save();
+    ctx.translate(cx, cy);
+    const baseGrad = this._grad('arena|' + Math.round(r), () => {
+      const g0 = ctx.createRadialGradient(0, 0, 8, 0, 0, r + 22);
+      g0.addColorStop(0, '#7e57c2');
+      g0.addColorStop(1, '#311b92');
+      return g0;
+    });
+    ctx.fillStyle = baseGrad;
+    ctx.beginPath();
+    ctx.arc(0, 0, r + 12, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.strokeStyle = '#ffd54f';
+    ctx.lineWidth = 3;
+    ctx.beginPath();
+    ctx.arc(0, 0, r, 0, Math.PI * 2);
+    ctx.stroke();
+    // 内圈细金边
+    ctx.strokeStyle = 'rgba(255,213,79,0.5)';
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.arc(0, 0, r - 8, 0, Math.PI * 2);
+    ctx.stroke();
+    ctx.restore();
+
+    // 中心光效（合成装置核心）
+    ctx.save();
+    ctx.translate(cx, cy);
+    const corePulse = 0.4 + 0.3 * Math.sin(Date.now() / 800);
+    const coreGrad = ctx.createRadialGradient(0, 0, 0, 0, 0, 25);
+    coreGrad.addColorStop(0, 'rgba(255,213,79,' + (0.4 * corePulse + 0.2) + ')');
+    coreGrad.addColorStop(0.5, 'rgba(255,179,0,' + (0.2 * corePulse) + ')');
+    coreGrad.addColorStop(1, 'rgba(255,179,0,0)');
+    ctx.fillStyle = coreGrad;
+    ctx.beginPath();
+    ctx.arc(0, 0, 25, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.restore();
+
+    const pair = this._mergeablePair();
+    const mergeHi = new Set(pair || []);
+
+    const slotR = L.slotR;
+    const circum = L.slotCircum;
+    const angles = L.slotAngles; // 上 / 右下 / 左下
+    for (let i = 0; i < 3; i++) {
+      const ang = angles[i];
+      // 以 (cx, cy) 为心，外接圆半径 circum，角 ang（数学坐标：-90°=朝上）
+      const sx = cx + Math.cos(ang) * circum;
+      const sy = cy + Math.sin(ang) * circum;
+
+      // 可合成对：金色脉冲环 + 顶部"可合成↑"提示
+      if (mergeHi.has(i)) {
+        const pulse = 0.5 + 0.5 * Math.sin(Date.now() / 150);
+        ctx.strokeStyle = '#ffd54f';
+        ctx.globalAlpha = 0.4 + 0.4 * pulse;
+        ctx.lineWidth = 3;
+        ctx.beginPath();
+        ctx.arc(sx, sy, slotR + 6, 0, Math.PI * 2);
+        ctx.stroke();
+        ctx.globalAlpha = 1;
+        ctx.fillStyle = 'rgba(255,213,79,' + (0.55 + 0.35 * pulse) + ')';
+        ctx.font = 'bold 11px ' + APPLE_FONT;
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillText('可合成', sx, sy - slotR * 0.55);
+      }
+
+      ctx.strokeStyle = '#9575cd';
+      ctx.lineWidth = 2;
+      ctx.setLineDash([5, 4]);
+      ctx.beginPath();
+      ctx.arc(sx, sy, slotR, 0, Math.PI * 2);
+      ctx.stroke();
+      ctx.setLineDash([]);
+
+      this.platformRects.push({ x: sx - slotR, y: sy - slotR, w: slotR * 2, h: slotR * 2, index: i });
+      const bb = this.game.platformSlots[i];
+      if (bb) {
+        // 合成台：所有等级陀螺尺寸一致（uniformSize），避免高等级陀螺超出槽位
+        drawBeyblade(ctx, sx, sy, bb, Math.max(0.5, slotR / 50), { maxSize: slotR * 1.8, uniformSize: true });
+        // 属性角标已去除（陀螺本体为纯净 PNG + 中央等级数字）
+      } else if (!this.game.tutorialDone && this.game.inventory.length > 0) {
+        // 新手期空槽提示：轻量"拖入"引导（仅教学未完成且有库存时）
+        ctx.fillStyle = 'rgba(255,255,255,0.35)';
+        ctx.font = '11px ' + APPLE_FONT;
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillText('拖入', sx, sy);
+      }
+    }
+    // 合成台空状态：3槽全空时，中央显示两行（收集进度 + 行动号召）
+    const allEmpty = !this.game.platformSlots[0] && !this.game.platformSlots[1] && !this.game.platformSlots[2];
+    if (allEmpty) {
+      const codexUnlocked = this.game.collection.filter(c => c.unlocked).length;
+      const codexTotal = this.game.collection.length;
+      ctx.save();
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      // 第一行：收集进度（白色，稍大）
+      ctx.fillStyle = 'rgba(255,255,255,0.92)';
+      ctx.font = 'bold 15px ' + APPLE_FONT;
+      ctx.fillText('收集 ' + codexUnlocked + '/' + codexTotal, cx, cy - 10);
+      // 第二行：行动号召（淡紫色，稍小）
+      ctx.fillStyle = 'rgba(209,196,233,0.85)';
+      ctx.font = '12px ' + APPLE_FONT;
+      ctx.fillText('合成升级，集齐传说陀螺', cx, cy + 12);
+      ctx.restore();
+    }
+  }
+
+  drawActionBar() {
+    const ctx = this.ctx;
+    const L = this.layout;
+    const W = L.W;
+    const gap = 16;
+    const btnW = Math.max(90, Math.min(120, Math.floor((W - 32 - gap * 2) / 3)));
+    const totalW = btnW * 3 + gap * 2;
+    const startX = (W - totalW) / 2;
+    // 按钮顺序：对战 · 合成 · 抽卡（从左到右）
+    const battleRect = { x: startX,                    y: L.actionY, w: btnW, h: L.actionBtnH, action: 'battle' };
+    const mergeRect  = { x: startX + btnW + gap,       y: L.actionY, w: btnW, h: L.actionBtnH, action: 'merge'  };
+    const drawRect   = { x: startX + (btnW + gap) * 2, y: L.actionY, w: btnW, h: L.actionBtnH, action: 'draw'   };
+    // 存给新手引导高亮光圈定位用
+    this.battleBtnRect = battleRect;
+    this.mergeBtnRect = mergeRect;
+    this.drawBtnRect = drawRect;
+    this.drawButton(battleRect.x, battleRect.y, battleRect.w, battleRect.h, '对战', '#e53935');
+    this.drawButton(mergeRect.x,  mergeRect.y,  mergeRect.w,  mergeRect.h,  '合成', '#ff8f00');
+    this.drawButton(drawRect.x,   drawRect.y,   drawRect.w,   drawRect.h,   '抽卡', '#7e57c2');
+    this.buttons.push(battleRect, mergeRect, drawRect);
+
+    // 游戏化装饰：外发光边框（每个按钮不同颜色发光）
+    const gameBtns = [
+      { rect: battleRect, color: '#ff5252', glow: 'rgba(255,82,82,0.5)' },
+      { rect: mergeRect,  color: '#ffb300', glow: 'rgba(255,179,0,0.5)' },
+      { rect: drawRect,   color: '#b388ff', glow: 'rgba(179,136,255,0.5)' }
+    ];
+    for (const gb of gameBtns) {
+      ctx.save();
+      // 外发光
+      ctx.shadowColor = gb.glow;
+      ctx.shadowBlur = 8 * this.shadowScale;
+      ctx.strokeStyle = gb.color;
+      ctx.lineWidth = 1.5;
+      this.roundRect(gb.rect.x - 1, gb.rect.y - 1, gb.rect.w + 2, gb.rect.h + 2, Math.min(18, gb.rect.h / 2));
+      ctx.stroke();
+      ctx.shadowBlur = 0;
+      // 内金属高光边
+      ctx.strokeStyle = 'rgba(255,255,255,0.3)';
+      ctx.lineWidth = 0.8;
+      this.roundRect(gb.rect.x + 2, gb.rect.y + 2, gb.rect.w - 4, gb.rect.h - 4, Math.min(16, gb.rect.h / 2 - 1));
+      ctx.stroke();
+      ctx.restore();
+    }
+    // 对战按钮呼吸光效（主要操作按钮，吸引玩家点击）
+    const battlePulse = 0.5 + 0.5 * Math.sin(Date.now() / 600);
+    ctx.save();
+    ctx.globalAlpha = 0.3 + 0.25 * battlePulse;
+    ctx.shadowColor = 'rgba(255,82,82,0.8)';
+    ctx.shadowBlur = 14 * this.shadowScale;
+    ctx.strokeStyle = '#ff8a80';
+    ctx.lineWidth = 2;
+    this.roundRect(battleRect.x - 2, battleRect.y - 2, battleRect.w + 4, battleRect.h + 4, Math.min(20, battleRect.h / 2 + 1));
+    ctx.stroke();
+    ctx.restore();
+    // 保底进度可视化：抽卡按钮内中下部金色小字，显示最近的保底剩余（与设计稿"保底4"一致）
+    if (this.game.energy >= 8) {
+      const pe = this.game.pityEpic || 0, pl = this.game.pityLegend || 0;
+      const remain = Math.max(1, Math.min(10 - pe, 30 - pl));
+      if (remain <= 8) {
+        ctx.save();
+        ctx.fillStyle = '#ffd54f';
+        ctx.font = 'bold 10px ' + APPLE_FONT;
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillText('保底 ' + remain + ' 抽', drawRect.x + drawRect.w / 2, drawRect.y + drawRect.h - 9);
+        ctx.restore();
+      }
+    }
+  }
+
+  // =====================================================
+  // 区域 5 · 过滤器（一行，占满整宽；抽卡按钮已移至底部操作栏）
+  // =====================================================
+  drawFiltersAndDraw() {
+    const ctx = this.ctx;
+    const L = this.layout;
+    const count = TIERS.length + 1;         // 全部 + 5 档（五行品质）
+    const btnH = L.filterH;
+    const gap = 8;
+    const y = L.filterY;
+
+    // 过滤器占满整宽（抽卡按钮已移至底部操作栏，不再预留右侧空间）
+    const availFilt = this.width - 32;
+    const filtBtnW = Math.max(36, Math.min(64, Math.floor((availFilt - (count - 1) * gap) / count)));
+    // 六个筛选按钮（全部、普通、稀有、史诗、精英、传说）居中显示
+    const totalFiltWidth = count * filtBtnW + (count - 1) * gap;
+    let fx = (this.width - totalFiltWidth) / 2; // 居中显示（原靠左16→居中）
+    this.filterRects = [];
+    // 全名优先级：filtBtnW >= 44 → 全名（11px 中文两字 24px + 边距 20 = 44）；否则两字
+    const fullName = filtBtnW >= 44;
+    const SHORT = { '土·普通': '土', '木·稀有': '木', '水·史诗': '水', '火·精英': '火', '金·传说': '金' };
+    const filtNames = [fullName ? '全部' : '全', ...TIERS.map(t => (fullName ? t.name : (SHORT[t.name] || t.name.charAt(0))))];
+    for (let i = -1; i < TIERS.length; i++) {
+      const name = filtNames[i + 1];
+      const rect = {
+        x: fx, y, w: filtBtnW, h: btnH,
+        tierIndex: i, name,
+        color: i >= 0 ? TIERS[i].color : null,
+      };
+      const active = (i === -1 ? (this.game.filterTier === -1) : (this.game.filterTier === i));
+      this.drawFilterButton(rect, active);
+      this.filterRects.push(rect);
+      fx += filtBtnW + gap;
+    }
+  }
+
+  drawFilterButton(rect, active) {
+    const ctx = this.ctx;
+    ctx.save();
+    const r = Math.min(12, rect.h / 2 - 1);
+    if (active) {
+      // 选中态：品质色渐变底 + 白色描边 + 顶部高光条
+      const g = this._grad('fbtn|' + rect.name + '|' + Math.round(rect.y) + '|' + Math.round(rect.h), () => {
+        const gg = ctx.createLinearGradient(rect.x, rect.y, rect.x, rect.y + rect.h);
+        gg.addColorStop(0, this._shadeColor(rect.color || '#7e57c2', 0.35));
+        gg.addColorStop(1, rect.color || '#7e57c2');
+        return gg;
+      });
+      ctx.fillStyle = g;
+      this.roundRect(rect.x, rect.y, rect.w, rect.h, r); ctx.fill();
+      ctx.strokeStyle = '#ffffff';
+      ctx.lineWidth = 1.5;
+      this.roundRect(rect.x + 0.75, rect.y + 0.75, rect.w - 1.5, rect.h - 1.5, r - 0.75); ctx.stroke();
+      ctx.fillStyle = 'rgba(255,255,255,0.22)';
+      this.roundRect(rect.x + 3, rect.y + 2, rect.w - 6, Math.max(2, rect.h * 0.28), 3); ctx.fill();
+    } else {
+      ctx.fillStyle = 'rgba(255,255,255,0.08)';
+      ctx.strokeStyle = rect.color || '#7e57c2';
+      ctx.lineWidth = 1.5;
+      this.roundRect(rect.x, rect.y, rect.w, rect.h, r); ctx.fill(); ctx.stroke();
+    }
+    ctx.fillStyle = '#ffffff';
+    const fsize = Math.max(11, Math.min(14, Math.floor(rect.w / 5)));
+    ctx.font = 'bold ' + fsize + 'px ' + APPLE_FONT;
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(rect.name, rect.x + rect.w / 2, rect.y + rect.h / 2);
+    ctx.restore();
+  }
+
+  /** 实际渲染的背包行数：需要分页时，网格底部让出 24px 给分页器，避免分页器压住最后一行 */
+  inventoryRowsMax() {
+    const L = this.layout;
+    const cols = Math.max(1, L.invCols);
+    const base = Math.max(1, L.invRowsMax);
+    const list = this.game.getFilteredInventory();
+    if (Math.ceil(list.length / Math.max(1, cols * base)) <= 1) return base;
+    return Math.max(1, Math.floor((L.invMaxBottom - 24 - L.invY + L.invGap) / L.invRowStep));
+  }
+
+  // =====================================================
+  // 区域 6 · 背包网格（动态 cell，保证不出 invMaxBottom；溢出提示在右下方 badge）
+  // =====================================================
+  drawInventory() {
+    const ctx = this.ctx;
+    const L = this.layout;
+    const list = this.game.getFilteredInventory();
+    const cols = L.invCols, cell = L.invCell, gap = L.invGap;
+    const startX = L.invStartX;
+    let x = startX;
+    let y = L.invY;
+    this.gridRects.length = 0;
+
+    const maxItems = Math.max(1, cols * this.inventoryRowsMax());
+    const totalPages = Math.max(1, Math.ceil(list.length / maxItems));
+    // 分页收敛：出售/筛选/合成导致页数变化时，页码自动钳制回合法范围
+    if (this.game.invPage >= totalPages) this.game.invPage = totalPages - 1;
+    if (this.game.invPage < 0) this.game.invPage = 0;
+    const page = this.game.invPage;
+    const drawn = list.slice(page * maxItems, (page + 1) * maxItems);
+
+    // 空背包引导：无陀螺时给精致空状态（空槽位视觉 + 文案），避免空白区域不知所措
+    if (drawn.length === 0) {
+      ctx.save();
+      const ex = L.invStartX;
+      const ew = startX + cols * cell + (cols - 1) * gap - ex;
+      const ey = L.invY + (L.invMaxBottom - L.invY) / 2;
+      const emptyAll = list.length === 0 && this.game.filterTier < 0;
+      const cx = ex + ew / 2;
+      const cy = ey - 14;
+      // 中央：3 个灰色虚线圆环"空槽位"（暗示这里将放置陀螺）
+      ctx.strokeStyle = 'rgba(255,255,255,0.16)';
+      ctx.lineWidth = 1.5;
+      ctx.setLineDash([5, 6]);
+      for (let i = -1; i <= 1; i++) {
+        ctx.beginPath();
+        ctx.arc(cx + i * 34, cy, 23, 0, Math.PI * 2);
+        ctx.stroke();
+      }
+      ctx.setLineDash([]);
+      // 中间槽位：金色"+"（待填充语义）
+      ctx.fillStyle = 'rgba(255,213,79,0.55)';
+      ctx.font = 'bold 22px ' + APPLE_FONT;
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText('+', cx, cy);
+      // 主文案
+      ctx.fillStyle = 'rgba(255,255,255,0.78)';
+      ctx.font = 'bold 14px ' + APPLE_FONT;
+      ctx.fillText(emptyAll ? '背包空空的，去抽卡获得陀螺吧' : '该品质还没有陀螺', cx, cy + 50);
+      // 副文案
+      ctx.fillStyle = 'rgba(255,255,255,0.42)';
+      ctx.font = '11px ' + APPLE_FONT;
+      ctx.fillText(emptyAll ? '消耗能量抽卡 · 集齐 25 款图鉴' : '试试其它品质标签', cx, cy + 68);
+      ctx.restore();
+    }
+
+    for (let i = 0; i < drawn.length; i++) {
+      const bb = drawn[i];
+      const rect = { x, y, w: cell, h: cell, beyblade: bb };
+      this.gridRects.push(rect);
+      ctx.save();
+      ctx.shadowColor = 'rgba(0,0,0,0.25)';
+      ctx.shadowBlur = 3 * this.shadowScale;
+      ctx.fillStyle = 'rgba(255,255,255,0.06)';
+      ctx.strokeStyle = bb.tier.color;
+      ctx.lineWidth = 1.5;
+      this.roundRect(x, y, cell, cell, Math.max(8, Math.min(12, cell / 5)));
+      ctx.fill(); ctx.stroke();
+      ctx.restore();
+      // 背包：所有等级陀螺尺寸一致（uniformSize），避免高等级陀螺超出格子
+      drawBeyblade(ctx, x + cell / 2, y + cell / 2, bb, Math.max(0.3, cell / 100), { maxSize: cell * 0.88, uniformSize: true });
+      // 属性角标已去除（陀螺本体为纯净 PNG + 中央等级数字）
+      x += cell + gap;
+      if ((i + 1) % cols === 0) { x = startX; y += cell + gap; }
+    }
+
+    // 分页器：超出可视容量时，在网格右下角给出 ‹ 1/3 ›（左右箭头翻页 · 中点提示长按出售）
+    if (totalPages > 1) {
+      const pH = 22, chevW = 22, padX = 4;
+      const gridRightX = startX + cols * cell + (cols - 1) * gap;
+      const pY = L.invMaxBottom - pH - 2;
+      const midText = (page + 1) + '/' + totalPages;
+      ctx.font = 'bold 11px ' + APPLE_FONT;
+      const midW = mtW(ctx, midText) + 18;
+      const pagerW = chevW * 2 + midW + padX * 4;
+      const pX = gridRightX - pagerW;
+      const leftRect = { x: pX, y: pY, w: chevW, h: pH, action: 'inv_prev' };
+      const midRect = { x: pX + chevW + padX, y: pY, w: midW, h: pH, action: 'inv_page' };
+      const rightRect = { x: pX + chevW + padX + midW + padX, y: pY, w: chevW, h: pH, action: 'inv_next' };
+      // 中点：金色小胶囊（当前页/总页数）
+      ctx.save();
+      ctx.fillStyle = 'rgba(255,179,0,0.18)';
+      ctx.strokeStyle = '#ffd54f';
+      ctx.lineWidth = 1.2;
+      this.roundRect(midRect.x, midRect.y, midRect.w, midRect.h, midRect.h / 2); ctx.fill(); ctx.stroke();
+      ctx.fillStyle = '#ffd54f';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText(midText, midRect.x + midRect.w / 2, midRect.y + midRect.h / 2 + 0.5);
+      ctx.restore();
+      // 左右箭头：越界侧置灰不可翻
+      this._drawChevron(leftRect, page > 0);
+      this._drawChevron(rightRect, page < totalPages - 1);
+      this.buttons.push(leftRect, midRect, rightRect);
+    }
+  }
+
+  /** 分页器左右箭头（苹果风 chevron，enabled=false 时置灰） */
+  _drawChevron(rect, enabled) {
+    const ctx = this.ctx;
+    ctx.save();
+    ctx.globalAlpha = enabled ? 1 : 0.32;
+    ctx.fillStyle = enabled ? 'rgba(255,255,255,0.16)' : 'rgba(255,255,255,0.06)';
+    ctx.strokeStyle = enabled ? 'rgba(255,255,255,0.40)' : 'rgba(255,255,255,0.18)';
+    ctx.lineWidth = 1;
+    this.roundRect(rect.x, rect.y, rect.w, rect.h, rect.h / 2); ctx.fill(); ctx.stroke();
+    // 分页箭头用 PNG（icon-prev/next.png），与设计稿 pager 一致
+    const dir = rect.action === 'inv_prev' ? 'prev' : 'next';
+    const is = Math.min(rect.w, rect.h) * 0.55;
+    if (!this._drawPngIcon(dir, rect.x + rect.w / 2, rect.y + rect.h / 2, is)) {
+      // PNG 缺失回退：矢量三角形
+      const dirS = rect.action === 'inv_prev' ? -1 : 1;
+      ctx.strokeStyle = enabled ? '#ffd54f' : 'rgba(255,255,255,0.35)';
+      ctx.lineWidth = 2;
+      ctx.lineCap = 'round';
+      const cx = rect.x + rect.w / 2, cy = rect.y + rect.h / 2;
+      const s = 5;
+      ctx.beginPath();
+      ctx.moveTo(cx + dirS * s, cy - s);
+      ctx.lineTo(cx - dirS * s, cy);
+      ctx.lineTo(cx + dirS * s, cy + s);
+      ctx.stroke();
+    }
+    ctx.restore();
+  }
+
+  // =====================================================
+  // 图鉴：TopBar 相同，标题计数 + 等级行
+  // · Lv 标签改为 cell 内左上角内嵌徽章，不再悬在 cell 下方，杜绝与下一行的 tier 名撞。
+  // =====================================================
+  drawCodex() {
+    const ctx = this.ctx;
+    const L = this.layout;
+    const W = L.W;
+
+    const cnt = this.game.codexCount();
+    const total = this.game.codexTotal();
+    const cntY = L.titleY + 2;
+
+    // 顶部标题 + 集齐状态（对齐 Title 区内标题行 y，不挤占 Tab）
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'top';
+    if (cnt >= total && total > 0) {
+      ctx.fillStyle = '#ffd54f';
+      ctx.font = 'bold 18px ' + APPLE_FONT;
+      ctx.shadowColor = 'rgba(255,213,79,0.6)';
+      ctx.shadowBlur = 10 * this.shadowScale;
+      // 图标资产 v3：两侧 ★ → icon-star.png
+      const cntTxt = '图鉴集齐 · 陀螺大师';
+      const cntTw = mtW(ctx, cntTxt);
+      ctx.fillText(cntTxt, W / 2, cntY);
+      ctx.shadowBlur = 0;
+      this._drawPngIcon('star', W / 2 - cntTw / 2 - 13, cntY + 9, 14);
+      this._drawPngIcon('star', W / 2 + cntTw / 2 + 13, cntY + 9, 14);
+    } else {
+      ctx.fillStyle = '#ffd54f';
+      ctx.font = 'bold 18px ' + APPLE_FONT;
+      ctx.fillText('图鉴  ' + cnt + ' / ' + total, W / 2, cntY);
+    }
+
+    // 批次C·策略系统（play-design v1）：图鉴头部克制链小胶囊（五行相克：金克木、木克土、土克水、水克火、火克金）
+    ctx.save();
+    const ckW = 110, ckH = 16, ckX = 14, ckY = cntY + 1;
+    ctx.fillStyle = 'rgba(255,255,255,0.10)';
+    this.roundRect(ckX, ckY, ckW, ckH, 8); ctx.fill();
+    ctx.strokeStyle = 'rgba(255,255,255,0.18)'; ctx.lineWidth = 1;
+    this.roundRect(ckX + 0.5, ckY + 0.5, ckW - 1, ckH - 1, 8); ctx.stroke();
+    ctx.fillStyle = 'rgba(255,255,255,0.55)';
+    ctx.font = '9px ' + APPLE_FONT;
+    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.fillText('金>木>土>水>火', ckX + ckW / 2, ckY + ckH / 2 + 0.5);
+    ctx.restore();
+
+    // 收集进度条：标题下方细条（金色渐变 + 百分比），给长期目标感
+    // 增加呼吸感：标题和进度条间距22→26，进度条和横幅间距8→12
+    const pct = total > 0 ? cnt / total : 0;
+    const pW = Math.min(210, W - 130);
+    const pX = W / 2 - pW / 2;
+    const pY = cntY + 26;
+    ctx.fillStyle = 'rgba(255,255,255,0.12)';
+    this.roundRect(pX, pY, pW, 5, 2.5); ctx.fill();
+    if (pct > 0) {
+      const pg = this._grad('codexP|' + Math.round(pX) + '|' + Math.round(pY) + '|' + Math.round(pW), () => {
+        const gg = ctx.createLinearGradient(pX, pY, pX + pW, pY);
+        gg.addColorStop(0, '#ffb300');
+        gg.addColorStop(1, '#ffd54f');
+        return gg;
+      });
+      ctx.fillStyle = pg;
+      this.roundRect(pX, pY, Math.max(5, pW * pct), 5, 2.5); ctx.fill();
+    }
+    ctx.fillStyle = 'rgba(255,255,255,0.55)';
+    ctx.font = '10px ' + APPLE_FONT;
+    ctx.fillText(Math.floor(pct * 100) + '%', W / 2 + pW / 2 + 6, pY - 2);
+
+    // 图鉴阶段奖励横幅（play-design v1）：收集 5/10/15/20 档发大奖
+    // 增加呼吸感：进度条和横幅间距8→12
+    if (typeof this.game.codexNextStage === 'function') {
+      const next = this.game.codexNextStage();
+      const stages = this.game.codexStages();
+      const claimed = this.game.codexClaimed || 0;
+      const bY = pY + 60, bH = 24; // 横幅往下移50px（原pY+10→pY+60）
+      const bX = 14, bW = W - 28;
+      if (next) {
+        // 有可领阶段：金色可领横幅
+        ctx.save();
+        const bg2 = this._grad('codexR|' + Math.round(bX) + '|' + Math.round(bY), () => {
+          const gg = ctx.createLinearGradient(bX, bY, bX + bW, bY);
+          gg.addColorStop(0, 'rgba(255,213,79,0.22)');
+          gg.addColorStop(1, 'rgba(255,152,0,0.18)');
+          return gg;
+        });
+        ctx.fillStyle = bg2;
+        this.roundRect(bX, bY, bW, bH, bH / 2); ctx.fill();
+        ctx.strokeStyle = 'rgba(255,213,79,0.7)'; ctx.lineWidth = 1.2;
+        this.roundRect(bX + 0.6, bY + 0.6, bW - 1.2, bH - 1.2, bH / 2 - 0.6); ctx.stroke();
+        ctx.fillStyle = '#ffd54f';
+        ctx.font = 'bold 12px ' + APPLE_FONT;
+        ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
+        ctx.fillText('收集 ' + cnt + '/' + total + ' · 可领「' + next.title + '」大奖', bX + 14, bY + bH / 2 + 0.5);
+        // 领取按钮
+        const ckW = 64, ckH = 22;
+        const ck = { x: bX + bW - ckW - 8, y: bY + (bH - ckH) / 2, w: ckW, h: ckH, action: 'codex_claim' };
+        this.drawButton(ck.x, ck.y, ck.w, ck.h, '领取', '#ffb300');
+        this.buttons.push(ck);
+        ctx.restore();
+      } else {
+        // 已领完 / 未达：进度提示条
+        const doneAll = claimed >= 20;
+        ctx.fillStyle = 'rgba(255,255,255,0.06)';
+        this.roundRect(bX, bY, bW, bH, bH / 2); ctx.fill();
+        ctx.strokeStyle = 'rgba(255,255,255,0.14)'; ctx.lineWidth = 1;
+        this.roundRect(bX + 0.5, bY + 0.5, bW - 1, bH - 1, bH / 2); ctx.stroke();
+        ctx.fillStyle = doneAll ? '#ffd54f' : 'rgba(255,255,255,0.55)';
+        ctx.font = 'bold 11px ' + APPLE_FONT;
+        ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+        if (doneAll) {
+          // 图标资产 v3：两侧 ★ → icon-star.png
+          const skinTxt = '全图鉴·大师 限定皮肤已解锁';
+          const skinTw = mtW(ctx, skinTxt);
+          ctx.fillText(skinTxt, W / 2, bY + bH / 2);
+          this._drawPngIcon('star', W / 2 - skinTw / 2 - 12, bY + bH / 2, 13);
+          this._drawPngIcon('star', W / 2 + skinTw / 2 + 12, bY + bH / 2, 13);
+        }
+        else {
+          const ns = stages.find(s => s.n > claimed);
+          ctx.fillText('已领 ' + claimed + ' 档 · 收集 ' + (ns ? ns.n : total) + '/' + total + ' 解锁「' + (ns ? ns.title : '-') + '」', W / 2, bY + bH / 2);
+        }
+      }
+    }
+
+    const startY = L.codexStartY;
+    const rowH = L.codexRowH;
+    const labelW = L.codexLabelW;
+    const leftPad = (L.codexLeftPad !== undefined && L.codexLeftPad !== null) ? L.codexLeftPad : 12;
+    const gap = L.codexGap;
+    const cell = L.codexCell;
+    const gridStartX = (L.codexGridStartX !== undefined && L.codexGridStartX !== null) ? L.codexGridStartX : (leftPad + labelW + gap);
+    const tierNames = ['普通', '稀有', '史诗', '精英', '传说'];
+    for (let t = 0; t < TIERS.length; t++) {
+      const tier = TIERS[t];
+      const ry = startY + t * rowH;
+
+      // 先计算该品质收集进度
+      let rowCnt = 0;
+      for (let l = 1; l <= 5; l++) {
+        const c = this.game.collection.find(x => x.tierIndex === t && x.level === l);
+        if (c && c.unlocked) rowCnt++;
+      }
+      const rowDone = rowCnt >= 5;
+
+      // 品质胶囊徽章（上面一行）：品质色渐变底 + 品质名和收集进度一行显示
+      // 新布局：品质标签单独一行（上面），陀螺单独一行（下面）
+      // 品质标签左对齐，和第一列陀螺的中心对齐（不要整行居中）
+      const bdW = 62, bdH = 20;
+      const bdX = gridStartX + cell / 2 - bdW / 2, bdY = ry + 4; // 和第一列陀螺中心对齐
+      const bg = this._grad('tierBadge|' + t + '|' + Math.round(bdY) + '|' + Math.round(bdH), () => {
+        const gg = ctx.createLinearGradient(bdX, bdY, bdX, bdY + bdH);
+        gg.addColorStop(0, this._shadeColor(tier.color, 0.42));
+        gg.addColorStop(1, tier.color);
+        return gg;
+      });
+      ctx.fillStyle = bg;
+      this.roundRect(bdX, bdY, bdW, bdH, bdH / 2); ctx.fill();
+      ctx.strokeStyle = 'rgba(255,255,255,0.45)';
+      ctx.lineWidth = 1;
+      this.roundRect(bdX + 0.5, bdY + 0.5, bdW - 1, bdH - 1, bdH / 2 - 0.5); ctx.stroke();
+      // 根据品质色亮度自适应文字色：金色等亮色用深色文字，其他用白色
+      const _rgb = this._hexToRgb(tier.color);
+      const _luminance = _rgb ? (0.299 * _rgb.r + 0.587 * _rgb.g + 0.114 * _rgb.b) / 255 : 0.5;
+      const tierTextColor = _luminance > 0.6 ? '#3a2a0a' : '#ffffff';
+      // 品质名和收集进度一行显示："稀有 1/5"，集齐时显示"传说 集齐"
+      const badgeText = rowDone ? (tierNames[t] + ' 集齐') : (tierNames[t] + ' ' + rowCnt + '/5');
+      ctx.fillStyle = tierTextColor;
+      ctx.font = 'bold 11px ' + APPLE_FONT;
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      // 文字描边确保在任何背景上都可见
+      ctx.strokeStyle = _luminance > 0.6 ? 'rgba(255,255,255,0.3)' : 'rgba(0,0,0,0.35)';
+      ctx.lineWidth = 2;
+      ctx.strokeText(badgeText, bdX + bdW / 2, bdY + bdH / 2 + 0.5);
+      ctx.fillText(badgeText, bdX + bdW / 2, bdY + bdH / 2 + 0.5);
+
+      // 陀螺区域（下面一行）：5个陀螺占满整个宽度，放大到最大尺寸
+      const topY = ry + 28; // 品质标签下面，留4px间距
+      const topH = rowH - 32; // 陀螺区域高度（扣除品质标签20px + 上下间距）
+      const topCell = Math.min(cell, topH); // 陀螺大小取水平cell和垂直空间的最小值
+      const topCyy = topY + topH / 2; // 陀螺垂直居中
+
+      for (let l = 1; l <= 5; l++) {
+        const c = this.game.collection.find(x => x.tierIndex === t && x.level === l);
+        const ccx = gridStartX + (l - 1) * (cell + gap) + cell / 2;
+        const cyy = topCyy; // 陀螺垂直居中
+        const unlocked = !!(c && c.unlocked);
+        // 已解锁卡片：透明背景 + 细边框，陀螺本体清晰可见，旋转时有动感
+        // 未解锁卡片：深灰背景 + 灰色边框 + 锁图标，明显弱化
+        if (unlocked) {
+          // 透明背景（不填充），只保留细边框，让陀螺本体成为视觉焦点
+          ctx.strokeStyle = 'rgba(255,255,255,0.18)';
+          ctx.lineWidth = 1;
+          this.roundRect(ccx - topCell / 2 + 0.5, cyy - topCell / 2 + 0.5, topCell - 1, topCell - 1, Math.max(6, Math.min(10, topCell / 6)));
+          ctx.stroke();
+        } else {
+          // 未解锁：深灰背景 + 灰色细边框
+          ctx.fillStyle = 'rgba(255,255,255,0.025)';
+          this.roundRect(ccx - topCell / 2, cyy - topCell / 2, topCell, topCell, Math.max(6, Math.min(10, topCell / 6)));
+          ctx.fill();
+          ctx.strokeStyle = 'rgba(255,255,255,0.10)';
+          ctx.lineWidth = 1;
+          this.roundRect(ccx - topCell / 2 + 0.5, cyy - topCell / 2 + 0.5, topCell - 1, topCell - 1, Math.max(6, Math.min(10, topCell / 6)));
+          ctx.stroke();
+        }
+        if (unlocked) {
+          const bb = new Beyblade(t, l);
+          // 陀螺图标在方块容器以内，所有等级尺寸一致（uniformSize）
+          // 绘制大小按 radius*2*scale 计算（和对战页面一致），scale和maxSize调整到合适大小
+          drawBeyblade(ctx, ccx, cyy, bb, Math.max(0.3, topCell / 100), { maxSize: topCell * 0.88, uniformSize: true });
+        } else {
+          // 图标资产 v3：图鉴未解锁 ? → icon-lock.png（更暗更灰）
+          ctx.globalAlpha = 0.4;
+          this._drawPngIcon('lock', ccx, cyy, Math.max(18, topCell * 0.45));
+          ctx.globalAlpha = 1;
+        }
+        // 等级数字已在陀螺本体中央显示（beyblade.js sprite），无需额外 Lv 徽章
+      }
+    }
+  }
+
+  _mergeablePair() {
+    const s = this.game.platformSlots;
+    for (let i = 0; i < 3; i++) {
+      for (let j = i + 1; j < 3; j++) {
+        if (s[i] && s[j] && s[i].canMergeWith(s[j])) return [i, j];
+      }
+    }
+    return null;
+  }
+
+  // =====================================================
+  // 控件渲染 · 按钮 / 图标 / Tab
+  // =====================================================
+  drawButton(x, y, w, h, text, color) {
+    const ctx = this.ctx;
+    const radius = Math.min(18, h / 2 - 1);
+    const sameRect = (a, b) => a && b && Math.abs(a.x - b.x) < 0.01 && Math.abs(a.y - b.y) < 0.01 && Math.abs(a.w - b.w) < 0.01 && Math.abs(a.h - b.h) < 0.01;
+    const pressed = sameRect(this.pressedBtn && this.pressedBtn.rect, { x, y, w, h });
+    const nowT = pressed ? (Date.now() - this.pressedBtn.t0) : 0;
+    const pressT = pressed && nowT < 180 ? (1 - Math.pow(1 - nowT / 180, 3)) : (pressed ? 1 : 0);
+    const inset = pressT * 1.2;
+
+    ctx.save();
+    ctx.translate(x + w / 2, y + h / 2);
+    ctx.scale(1 - pressT * 0.06, 1 - pressT * 0.06);
+    ctx.translate(-(x + w / 2), -(y + h / 2));
+
+    ctx.shadowColor = 'rgba(0,0,0,0.30)';
+    // 静止装饰阴影走 shadowScale（iOS/低配关闭），按下反馈走 pressShadow（始终保留手感）
+    ctx.shadowBlur = (6 * this.shadowScale) + (pressT * 8 * this.pressShadow);
+    ctx.shadowOffsetY = (2 * this.shadowScale) + (pressT * 1.5 * this.pressShadow);
+
+    const g = this._grad('btn|' + color + '|' + Math.round(y) + '|' + Math.round(h) + '|' + Math.round(inset), () => {
+      const gg = ctx.createLinearGradient(0, y + inset, 0, y + h - inset);
+      gg.addColorStop(0, this._shadeColor(color, 0.18));
+      gg.addColorStop(0.5, color);
+      gg.addColorStop(1, this._shadeColor(color, -0.18));
+      return gg;
+    });
+    ctx.fillStyle = g;
+    this.roundRect(x + inset, y + inset, w - inset * 2, h - inset * 2, radius);
+    ctx.fill();
+    ctx.shadowBlur = 0;
+
+    ctx.strokeStyle = pressed ? 'rgba(255,255,255,0.9)' : 'rgba(255,255,255,0.35)';
+    ctx.lineWidth = pressed ? 2 : 1;
+    this.roundRect(x + inset + 0.5, y + inset + 0.5, w - inset * 2 - 1, h - inset * 2 - 1, radius);
+    ctx.stroke();
+
+    ctx.globalAlpha = 0.22;
+    ctx.fillStyle = '#ffffff';
+    this.roundRect(x + inset + 1.5, y + inset + 1.5, w - inset * 2 - 3, (h - inset * 2) * 0.48, Math.max(4, radius - 1));
+    ctx.fill();
+    ctx.globalAlpha = 1;
+
+    ctx.fillStyle = '#ffffff';
+    const fsize = Math.max(12, Math.min(16, Math.floor(w / 6.5)));
+    ctx.font = 'bold ' + fsize + 'px ' + APPLE_FONT;
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.shadowColor = 'rgba(0,0,0,0.35)';
+    // 文字阴影属装饰，按住时本就为 0；静止态在无阴影档位（iOS/低配）关闭
+    ctx.shadowBlur = (pressed ? 0 : (1.5 * this.shadowScale));
+    ctx.shadowOffsetY = (pressed ? 0 : (0.5 * this.shadowScale));
+    ctx.fillText(text, x + w / 2, y + h / 2 + 0.5);
+    ctx.shadowBlur = 0;
+    ctx.restore();
+  }
+
+  // 预加载真实 PNG 图标（微信小游戏 wx.createImage / 浏览器 new Image）
+  _loadIcons() {
+    try {
+      const mkImg = (typeof wx !== 'undefined' && wx.createImage) ? wx.createImage : (typeof Image !== 'undefined' ? function () { return new Image(); } : null);
+      if (!mkImg) return;
+      // base64 内嵌优先（真机 dataURI onload 不可靠 → 改由 utils.prepSrc 写 USER_DATA_PATH 文件再加载）
+      let I_B64 = null;
+      try { I_B64 = require('./assets').icons; } catch (e) {}
+
+      // ==========================================================
+      // 图片按需加载：首屏关键资源优先加载，其余延迟加载
+      // 首屏关键图标：金币、签到、音量、能量、合成、图鉴、更多游戏
+      // 延迟加载图标：品质图标、道具图标、元素图标等（首屏不需要）
+      // ==========================================================
+      const CRITICAL_ICONS = ['coin', 'sign', 'mute', 'unmute', 'energy', 'merge', 'codex', 'more', 'back', 'close'];
+      const self = this;
+
+      // ==========================================================
+      // 资源加载降级方案：
+      // 1. 图片加载失败时标记 _failed，最多重试3次
+      // 2. 图片加载超时处理（5秒超时）
+      // 3. 资源加载状态统计
+      // 4. 加载失败时回退到矢量绘制
+      // ==========================================================
+      const MAX_RETRY = 3; // 最大重试次数
+      const LOAD_TIMEOUT = 5000; // 加载超时（毫秒）
+      if (!self._loadStats) {
+        self._loadStats = { total: 0, loaded: 0, failed: 0, retries: 0 };
+      }
+
+      // 加载单个图标（含重试和超时）
+      function loadIcon(k, retryCount = 0) {
+        if (self.icons[k] && (self.icons[k]._loading || self.icons[k]._ok)) return;
+        // 已失败且达到最大重试次数，不再重试
+        if (self.icons[k] && self.icons[k]._failed && retryCount >= MAX_RETRY) return;
+
+        self._loadStats.total++;
+        const img = mkImg();
+        img._loading = true;
+        img._retryCount = retryCount;
+        let timeoutId = null;
+
+        const cleanup = () => {
+          if (timeoutId) {
+            clearTimeout(timeoutId);
+            timeoutId = null;
+          }
+        };
+
+        img.onload = (function (im) {
+          return function () {
+            cleanup();
+            im._ok = true;
+            im._loading = false;
+            im._failed = false;
+            self._loadStats.loaded++;
+            if (retryCount > 0) self._loadStats.retries++;
+          };
+        })(img);
+
+        img.onerror = function () {
+          cleanup();
+          img._loading = false;
+          img._failed = true;
+          self._loadStats.failed++;
+          // 重试机制：失败后延迟1秒重试
+          if (retryCount < MAX_RETRY) {
+            console.warn(`[资源加载] ${k} 加载失败，第${retryCount + 1}次重试...`);
+            setTimeout(() => {
+              self.icons[k] = null; // 清除失败的图片对象
+              loadIcon(k, retryCount + 1);
+            }, 1000);
+          } else {
+            console.error(`[资源加载] ${k} 加载失败，已达到最大重试次数(${MAX_RETRY})，回退矢量绘制`);
+          }
+        };
+
+        // 加载超时处理
+        timeoutId = setTimeout(() => {
+          if (img._loading && !img._ok) {
+            console.warn(`[资源加载] ${k} 加载超时(${LOAD_TIMEOUT}ms)，触发onerror`);
+            if (typeof img.abort === 'function') {
+              try { img.abort(); } catch (e) {}
+            }
+            img.onerror(); // 触发错误处理，进入重试逻辑
+          }
+        }, LOAD_TIMEOUT);
+
+        img.src = _prepSrc(I_B64 && I_B64[k], self._iconFiles[k], 'icons');
+        self.icons[k] = img;
+      }
+
+      // 首屏关键图标立即加载
+      for (const k of CRITICAL_ICONS) {
+        if (this._iconFiles[k]) loadIcon(k);
+      }
+
+      // 其余图标延迟加载（启动后3秒，空闲时加载）
+      const deferredIcons = [];
+      for (const k in this._iconFiles) {
+        if (CRITICAL_ICONS.indexOf(k) < 0) deferredIcons.push(k);
+      }
+      if (deferredIcons.length > 0) {
+        let idx = 0;
+        const loadNext = function () {
+          if (idx >= deferredIcons.length) return;
+          loadIcon(deferredIcons[idx]);
+          idx++;
+          // 每100ms加载一个，避免阻塞主线程
+          setTimeout(loadNext, 100);
+        };
+        setTimeout(loadNext, 3000); // 启动后3秒开始延迟加载
+      }
+    } catch (e) { /* PNG 缺失时回退矢量绘制 */ }
+  }
+
+  // 用 PNG 绘制图标（居中，含 padding）；图片未就绪回退矢量
+  // 按需加载：如果图标未加载且未在加载中，触发加载（首屏后延迟加载的图标）
+  _drawPngIcon(iconType, cx, cy, size) {
+    const img = this.icons[iconType];
+    if (img && img._ok && img.width > 0) {
+      this.ctx.drawImage(img, cx - size / 2, cy - size / 2, size, size);
+      return true;
+    }
+    // 图标未加载：触发加载（如果不在加载中），下一帧应该能显示
+    if (!img && this._iconFiles[iconType]) {
+      try {
+        const mkImg = (typeof wx !== 'undefined' && wx.createImage) ? wx.createImage : (typeof Image !== 'undefined' ? function () { return new Image(); } : null);
+        if (mkImg) {
+          const newImg = mkImg();
+          newImg._loading = true;
+          newImg.onload = function () { newImg._ok = true; newImg._loading = false; };
+          newImg.onerror = function () { newImg._loading = false; };
+          let I_B64 = null;
+          try { I_B64 = require('./assets').icons; } catch (e) {}
+          // 真机 dataURI onload 不可靠 → 改由 utils.prepSrc 写 USER_DATA_PATH 文件再加载
+          newImg.src = _prepSrc(I_B64 && I_B64[iconType], this._iconFiles[iconType], 'icons');
+          this.icons[iconType] = newImg;
+        }
+      } catch (e) {}
+    }
+    return false;
+  }
+
+  drawIconButton(rect, iconType) {
+    const ctx = this.ctx;
+    // 容器样式和金币模块一致：半透明黑色背景 + 浅色边框 + 大圆角，避免视觉上大小不一致
+    const radius = rect.h / 2;
+    const sameRect = (a, b) => a && b && Math.abs(a.x - b.x) < 0.01 && Math.abs(a.y - b.y) < 0.01 && Math.abs(a.w - b.w) < 0.01 && Math.abs(a.h - b.h) < 0.01;
+    const pressed = sameRect(this.pressedBtn && this.pressedBtn.rect, rect);
+    const nowT = pressed ? (Date.now() - this.pressedBtn.t0) : 0;
+    const pressT = pressed && nowT < 180 ? (1 - Math.pow(1 - nowT / 180, 3)) : (pressed ? 1 : 0);
+    ctx.save();
+    const cx = rect.x + rect.w / 2, cy = rect.y + rect.h / 2;
+    ctx.translate(cx, cy);
+    ctx.scale(1 - pressT * 0.08, 1 - pressT * 0.08);
+    ctx.translate(-cx, -cy);
+    ctx.fillStyle = pressed ? 'rgba(0,0,0,0.55)' : 'rgba(0,0,0,0.38)';
+    ctx.strokeStyle = pressed ? 'rgba(255,255,255,0.4)' : 'rgba(255,255,255,0.18)';
+    ctx.lineWidth = 1;
+    this.roundRect(rect.x, rect.y, rect.w, rect.h, radius); ctx.fill(); ctx.stroke();
+    const pad = Math.max(4, rect.h * 0.16);
+    const is = Math.min(rect.w, rect.h) - pad * 2;
+    if (!this._drawPngIcon(iconType, rect.x + rect.w / 2, rect.y + rect.h / 2, is)) {
+      drawVectorIcon(ctx, iconType, rect.x + rect.w / 2, rect.y + rect.h / 2, Math.min(rect.w, rect.h) * 0.72, '#ffffff');
+    }
+    ctx.restore();
+  }
+
+  // =====================================================
+  // 模态面板外壳工具（P2 一致性重构）：遮罩/入场/面板底/关闭X 统一抽离
+  // —— 消除 8+ 处面板外壳复制粘贴（P2-5），并一并处安全区/按下态/遮罩透明度（P2-1/2/7）
+  // =====================================================
+
+  // 面板纵向安全区避让（P2-1）：矮屏不顶到刘海/胶囊，也不超出底部安全区
+  _panelCenterY(bh) {
+    const h = this.height;
+    const topMin = this.safeTop + 8;
+    const botMax = h - bh - this.safeBottom - 8;
+    let by = (h - bh) / 2;
+    by = Math.max(topMin, by);
+    // 仅当面板能在安全区内完整放下时才限制底部；
+    // 极端矮屏（面板高于可用高度）则保持贴顶，优先避免撞顶部胶囊/状态栏，允许底部溢出。
+    if (botMax > topMin) by = Math.min(by, botMax);
+    return by;
+  }
+
+  // 统一遮罩 + 入场缓动（缩放 0.84→1.0、淡入 0.4→1.0，默认 0.28s 时长），返回 ease/scale。
+  // 复用于全部 10 个面板（含连战浮层 P2-6），调用方负责在面板末尾 ctx.restore() 配对。
+  beginPanelAnim(t, dur, scaleFrom) {
+    const ctx = this.ctx, w = this.width, h = this.height;
+    ctx.fillStyle = PANEL_MASK; ctx.fillRect(0, 0, w, h);
+    const k = Math.min(1, (t || 0) / (dur || 0.28));
+    const ease = 1 - Math.pow(1 - k, 3);
+    const sFrom = scaleFrom != null ? scaleFrom : 0.84;
+    const scale = sFrom + (1 - sFrom) * ease;
+    ctx.save();
+    ctx.globalAlpha = Math.min(1, 0.4 + 0.6 * ease);
+    ctx.translate(w / 2, h / 2);
+    ctx.scale(scale, scale);
+    ctx.translate(-w / 2, -h / 2);
+    return { ease, scale };
+  }
+
+  // 面板底（玻璃渐变 + 金边 + 顶部高光），颜色可覆盖（出售红 / 连战青）。
+  drawPanelBody(opts) {
+    const ctx = this.ctx;
+    const { bx, by, bw, bh, key, bgFrom, bgTo, border } = opts;
+    ctx.save();
+    ctx.shadowColor = 'rgba(0,0,0,0.45)';
+    ctx.shadowBlur = 22 * this.shadowScale;
+    ctx.shadowOffsetY = 5 * this.shadowScale;
+    const pg = this._grad(key + '|' + Math.round(bx) + '|' + Math.round(by) + '|' + Math.round(bh), () => {
+      const gg = ctx.createLinearGradient(bx, by, bx, by + bh);
+      gg.addColorStop(0, bgFrom || 'rgba(126,87,194,0.98)');
+      gg.addColorStop(1, bgTo || 'rgba(49,27,146,0.98)');
+      return gg;
+    });
+    ctx.fillStyle = pg;
+    this.roundRect(bx, by, bw, bh, 20); ctx.fill();
+    ctx.shadowBlur = 0;
+    ctx.restore();
+    ctx.strokeStyle = border || '#ffd54f'; ctx.lineWidth = 2;
+    this.roundRect(bx + 1, by + 1, bw - 2, bh - 2, 20); ctx.stroke();
+    const hl = ctx.createLinearGradient(bx + 12, by, bx + 12, by + 14);
+    hl.addColorStop(0, 'rgba(255,255,255,0.5)');
+    hl.addColorStop(1, 'rgba(255,255,255,0)');
+    ctx.fillStyle = hl;
+    this.roundRect(bx + 12, by, bw - 24, 14, 7); ctx.fill();
+  }
+
+  // 关闭 X（统一圆形胶囊 + icon-close.png，带按下态，P2-2）：点击率最高的面板控件此前零反馈
+  drawCloseX(action, bx, by, bw) {
+    const ctx = this.ctx;
+    const close = { x: bx + bw - 38, y: by + 18, w: 26, h: 26, action };
+    const sameRect = (a, b) => a && b && Math.abs(a.x - b.x) < 0.01 && Math.abs(a.y - b.y) < 0.01 && Math.abs(a.w - b.w) < 0.01 && Math.abs(a.h - b.h) < 0.01;
+    const pressed = sameRect(this.pressedBtn && this.pressedBtn.rect, close);
+    const nowT = pressed ? (Date.now() - this.pressedBtn.t0) : 0;
+    const pressT = pressed && nowT < 180 ? (1 - Math.pow(1 - nowT / 180, 3)) : (pressed ? 1 : 0);
+    const cx = close.x + close.w / 2, cy = close.y + close.h / 2;
+    ctx.save();
+    ctx.translate(cx, cy);
+    ctx.scale(1 - pressT * 0.08, 1 - pressT * 0.08);
+    ctx.translate(-cx, -cy);
+    ctx.fillStyle = pressed ? 'rgba(255,255,255,0.30)' : 'rgba(255,255,255,0.14)';
+    ctx.beginPath(); ctx.arc(cx, cy, close.w / 2, 0, Math.PI * 2); ctx.fill();
+    ctx.strokeStyle = 'rgba(255,255,255,0.7)'; ctx.lineWidth = 1.5;
+    if (!this._drawPngIcon('close', cx, cy, close.w - 8)) {
+      ctx.beginPath();
+      ctx.moveTo(close.x + 8, close.y + 8); ctx.lineTo(close.x + 18, close.y + 18);
+      ctx.moveTo(close.x + 18, close.y + 8); ctx.lineTo(close.x + 8, close.y + 18);
+      ctx.stroke();
+    }
+    ctx.restore();
+    this.modalRects.push(close);
+  }
+
+  drawTab(rect, active) {
+    const ctx = this.ctx;
+    const radius = Math.min(14, rect.h / 2 - 1);
+    ctx.shadowColor = active ? 'rgba(255,213,79,0.40)' : 'rgba(0,0,0,0.20)';
+    ctx.shadowBlur = (active ? 10 : 3) * this.shadowScale;
+    ctx.shadowOffsetY = 1 * this.shadowScale;
+    ctx.fillStyle = active ? '#ffd54f' : 'rgba(255,255,255,0.08)';
+    ctx.strokeStyle = active ? '#fff3c4' : 'rgba(255,255,255,0.30)';
+    ctx.lineWidth = active ? 1.5 : 1;
+    this.roundRect(rect.x, rect.y, rect.w, rect.h, radius);
+    ctx.fill(); ctx.stroke();
+    ctx.shadowBlur = 0;
+    // 图标 + 文字（图标在左，保持整体居中）
+    const icoColor = active ? '#1a0f33' : '#ffffff';
+    ctx.font = 'bold 14px ' + APPLE_FONT;
+    const hasIcon = !!rect.icon;
+    const iconS = 13, gap = 4;
+    const tw = mtW(ctx, rect.name);
+    const totalW = (hasIcon ? iconS + gap : 0) + tw;
+    const startX = rect.x + rect.w / 2 - totalW / 2;
+    if (hasIcon) {
+      const icoCx = startX + iconS / 2, icoCy = rect.y + rect.h / 2;
+      if (rect.icon === 'merge') {
+        // 合成：icon-merge.png（双交叠金色圆环，合并语义）；缺失时回退矢量圆环
+        if (!this._drawPngIcon('merge', icoCx, icoCy, iconS + 4)) {
+          ctx.strokeStyle = icoColor;
+          ctx.lineWidth = 1.8;
+          ctx.beginPath(); ctx.arc(icoCx - 3.5, icoCy, 5, 0, Math.PI * 2); ctx.stroke();
+          ctx.beginPath(); ctx.arc(icoCx + 3.5, icoCy, 5, 0, Math.PI * 2); ctx.stroke();
+        }
+      } else if (rect.icon === 'codex') {
+        // 图鉴：icon-codex.png（金色小陀螺）；缺失时回退矢量陀螺
+        if (!this._drawPngIcon('codex', icoCx, icoCy, iconS + 4)) {
+          drawBeyblade(ctx, icoCx, icoCy, new Beyblade(0, 1), 0.42);
+        }
+      }
+    }
+    ctx.fillStyle = active ? '#1a0f33' : '#ffffff';
+    ctx.font = 'bold 14px ' + APPLE_FONT;
+    ctx.textAlign = 'left';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(rect.name, startX + (hasIcon ? iconS + gap : 0), rect.y + rect.h / 2);
+  }
+
+  drawDrag() {
+    if (!this.drag) return;
+    drawBeyblade(this.ctx, this.drag.x, this.drag.y, this.drag.beyblade, 1.1);
+  }
+
+  drawSpintopBattle(dt) {
+    const b = this.game.battle;
+    if (!b) return;
+    b._fxLow = this.shadowScale === 0; // 同步低端档：关闭对战陀螺软光晕
+    const rects = b.draw(this.ctx);
+    if (rects && rects.length) for (let i = 0; i < rects.length; i++) this.buttons.push(rects[i]);
+  }
+
+  addFloatText(x, y, text, color = '#ffd54f') {
+    this.floatTexts.push({ x, y, text, color, life: 1.0, maxLife: 1.0 });
+  }
+  drawFloatTexts(dt) {
+    const ctx = this.ctx;
+    for (let i = this.floatTexts.length - 1; i >= 0; i--) {
+      const f = this.floatTexts[i];
+      if (!this._debugFreezeFx) { f.life -= dt; f.y -= dt * 26; }
+      if (f.life <= 0) { this.floatTexts.splice(i, 1); continue; }
+      ctx.globalAlpha = Math.max(0, f.life / f.maxLife);
+      ctx.fillStyle = f.color;
+      ctx.font = 'bold 16px ' + APPLE_FONT;
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText(f.text, f.x, f.y);
+    }
+    ctx.globalAlpha = 1;
+  }
+
+  drawTutorial() {
+    if (this.game.tutorialDone) return;
+    const ctx = this.ctx;
+    const w = this.width, h = this.height;
+    const step = Math.min(this.game.tutorialStep, 2);
+    const t = Date.now() / 600;
+
+    // 半透明遮罩（P2-7：统一 PANEL_MASK，与全部模态面板一致）
+    ctx.fillStyle = PANEL_MASK;
+    ctx.fillRect(0, 0, w, h);
+
+    // ---- 目标按钮：呼吸光圈 + 外扩扩散环 ----
+    const target = step === 0 ? this.drawBtnRect : (step === 1 ? this.mergeBtnRect : this.battleBtnRect);
+    if (target) {
+      const cx = target.x + target.w / 2, cy = target.y + target.h / 2;
+      const pulse = 0.5 + 0.5 * Math.sin(t * Math.PI * 2);
+      ctx.strokeStyle = '#ffd54f';
+      ctx.globalAlpha = 0.55 + 0.4 * pulse;
+      ctx.lineWidth = 2.5;
+      const ex = 6 + pulse * 3;
+      this.roundRect(target.x - ex, target.y - ex, target.w + ex * 2, target.h + ex * 2, Math.min(16, target.h / 2 + ex));
+      ctx.stroke();
+      ctx.globalAlpha = Math.max(0, 0.5 - pulse * 0.5);
+      ctx.lineWidth = 3;
+      ctx.beginPath();
+      ctx.arc(cx, cy, 10 + pulse * 26, 0, Math.PI * 2);
+      ctx.stroke();
+      ctx.globalAlpha = 1;
+    }
+
+    // ---- 苹果风引导卡（玻璃半透明 + 金边 + 顶部高亮白）----
+    const bw = Math.min(320, w - 32);
+    const bh = 152;
+    const bx = (w - bw) / 2;
+    const by = Math.max(this.safeTop + 8, h * 0.24);
+    ctx.save();
+    ctx.shadowColor = 'rgba(0,0,0,0.4)';
+    ctx.shadowBlur = 18 * this.shadowScale;
+    ctx.shadowOffsetY = 4 * this.shadowScale;
+    const bg = this._grad('tut|' + Math.round(bx) + '|' + Math.round(by) + '|' + Math.round(bh), () => {
+      const gg = ctx.createLinearGradient(bx, by, bx, by + bh);
+      gg.addColorStop(0, 'rgba(255,255,255,0.16)');
+      gg.addColorStop(1, 'rgba(255,255,255,0.06)');
+      return gg;
+    });
+    ctx.fillStyle = bg;
+    this.roundRect(bx, by, bw, bh, 18); ctx.fill();
+    ctx.shadowBlur = 0;
+    ctx.restore();
+    ctx.strokeStyle = 'rgba(255,213,79,0.9)';
+    ctx.lineWidth = 1.5;
+    this.roundRect(bx + 0.75, by + 0.75, bw - 1.5, bh - 1.5, 18); ctx.stroke();
+    const hl = this._grad('tuthl|' + Math.round(bx), () => {
+      const gg = ctx.createLinearGradient(bx + 10, by, bx + 10, by + 12);
+      gg.addColorStop(0, 'rgba(255,255,255,0.6)');
+      gg.addColorStop(1, 'rgba(255,255,255,0)');
+      return gg;
+    });
+    ctx.fillStyle = hl;
+    this.roundRect(bx + 10, by, bw - 20, 12, 6); ctx.fill();
+
+    // ---- 步骤图标（① ② ③ 金色圆徽）----
+    const icoR = 14;
+    const icoX = bx + 26, icoY = by + 36;
+    ctx.fillStyle = '#ffd54f';
+    ctx.beginPath(); ctx.arc(icoX, icoY, icoR, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = '#3a1d5e';
+    ctx.font = 'bold 15px ' + APPLE_FONT;
+    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.fillText(String(step + 1), icoX, icoY + 1);
+
+    // ---- 标题 + 两行说明 ----
+    const titles = ['抽卡得陀螺', '合成升级', '开始对战'];
+    const tips = [
+      '点右下「抽卡」消耗能量\n获得陀螺，集齐图鉴',
+      '把相同陀螺拖进合成台\n点「合成」升级更高等级',
+      '点「对战」用陀螺挑战对手\n赢取金币，冲击连胜'
+    ];
+    ctx.fillStyle = '#fff';
+    ctx.font = 'bold 17px ' + APPLE_FONT;
+    ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
+    ctx.fillText(titles[step], icoX + icoR + 12, icoY);
+    ctx.font = '13px ' + APPLE_FONT;
+    ctx.fillStyle = 'rgba(255,255,255,0.85)';
+    const lines = tips[step].split('\n');
+    for (let i = 0; i < lines.length; i++) {
+      ctx.fillText(lines[i], bx + 24, by + 66 + i * 20);
+    }
+
+    // ---- 跳过按钮（右上角，可点击跳过引导）----
+    const skipW = 56, skipH = 28;
+    const skip = { x: bx + bw - skipW - 10, y: by + 10, w: skipW, h: skipH, action: 'tutorial_skip' };
+    ctx.fillStyle = 'rgba(255,255,255,0.14)';
+    this.roundRect(skip.x, skip.y, skip.w, skip.h, 14); ctx.fill();
+    ctx.strokeStyle = 'rgba(255,255,255,0.4)';
+    ctx.lineWidth = 1;
+    this.roundRect(skip.x + 0.5, skip.y + 0.5, skip.w - 1, skip.h - 1, 14); ctx.stroke();
+    ctx.fillStyle = 'rgba(255,255,255,0.85)';
+    ctx.font = '12px ' + APPLE_FONT;
+    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.fillText('跳过', skip.x + skip.w / 2, skip.y + skip.h / 2 + 1);
+    this.modalRects.push(skip);
+
+    // ---- 指向目标的手势三角箭头（呼吸下落）----
+    const ay = by + bh + 12 + Math.sin(t * Math.PI * 2) * 5;
+    ctx.fillStyle = '#ffd54f';
+    ctx.globalAlpha = 0.72 + 0.28 * Math.sin(t * Math.PI * 2);
+    ctx.beginPath();
+    ctx.moveTo(w / 2, ay + 12);
+    ctx.lineTo(w / 2 - 9, ay - 4);
+    ctx.lineTo(w / 2 + 9, ay - 4);
+    ctx.closePath();
+    ctx.fill();
+    ctx.globalAlpha = 1;
+
+    // ---- 步骤进度点 ----
+    const dotsY = by + bh - 16;
+    for (let i = 0; i < 3; i++) {
+      const dx = w / 2 + (i - 1) * 16;
+      ctx.beginPath();
+      ctx.arc(dx, dotsY, i === step ? 4 : 3, 0, Math.PI * 2);
+      ctx.fillStyle = i === step ? '#ffd54f' : 'rgba(255,255,255,0.3)';
+      ctx.fill();
+    }
+  }
+
+  /** 抽卡仪式感动画：卡牌翻开 → 品质光束 → 陀螺展示 → 收入背包 */
+  drawDrawCard() {
+    const ctx = this.ctx, w = this.width, h = this.height;
+    const dc = this.game.drawCard;
+    if (!dc) return;
+    const bb = dc.bb;
+    const tier = bb.tier;
+    const t = dc.t;
+    const isLegend = bb.tierIndex >= 4;
+
+    ctx.fillStyle = PANEL_MASK;
+    ctx.fillRect(0, 0, w, h);
+
+    // 传说：金色放射光束（t>=0.35 开始，持续扩散）
+    // 性能：原本每帧建 12 个渐变（出货瞬间最卡）。改为整体旋转画布 t*0.6，
+    // 使 12 条光束角度变为常量 (i*2π/n)，渐变按索引 i 走 _grad 缓存，首帧后零分配。
+    if (isLegend && t >= 0.35) {
+      ctx.save();
+      ctx.translate(w / 2, h * 0.42);
+      ctx.rotate(t * 0.6);
+      const n = 12, rr = Math.min(w, h) * 0.45;
+      for (let i = 0; i < n; i++) {
+        const a = (Math.PI * 2 / n) * i;
+        const grd = this._grad('legendBeam_' + i, () => {
+          const g = ctx.createLinearGradient(0, 0, Math.cos(a) * rr, Math.sin(a) * rr);
+          g.addColorStop(0, 'rgba(255,213,79,0)');
+          g.addColorStop(0.7, 'rgba(255,213,79,0.35)');
+          g.addColorStop(1, 'rgba(255,213,79,0)');
+          return g;
+        });
+        ctx.strokeStyle = grd;
+        ctx.lineWidth = 22;
+        ctx.lineCap = 'round';
+        ctx.beginPath();
+        ctx.moveTo(0, 0);
+        ctx.lineTo(Math.cos(a) * rr, Math.sin(a) * rr);
+        ctx.stroke();
+      }
+      ctx.restore();
+    }
+
+    const cw = Math.min(230, w - 60), ch = Math.min(300, h * 0.52);
+    const cx = w / 2, cy = h * 0.42;
+
+    // 翻转进度：0-0.35 收窄（卡背），0.35-0.7 展开（卡面）
+    let sx = 1, face = false;
+    if (t < 0.35) {
+      sx = 1 - (t / 0.35) * 0.85;
+    } else if (t < 0.7) {
+      sx = 0.15 + ((t - 0.35) / 0.35) * 0.85;
+      face = true;
+    } else {
+      sx = 1;
+      face = true;
+    }
+    const revealDone = t >= 0.7;
+
+    ctx.save();
+    ctx.translate(cx, cy);
+    ctx.scale(Math.max(0.06, sx), 1);
+
+    const g = this._grad('card|' + Math.round(ch) + '|' + (isLegend ? 1 : 0), () => {
+      const gg = ctx.createLinearGradient(0, -ch / 2, 0, ch / 2);
+      gg.addColorStop(0, isLegend ? '#5b3a1a' : '#4a2e82');
+      gg.addColorStop(1, '#1f1233');
+      return gg;
+    });
+    ctx.fillStyle = g;
+    this.roundRect(-cw / 2, -ch / 2, cw, ch, 18); ctx.fill();
+    ctx.strokeStyle = face ? tier.color : '#9575cd';
+    ctx.lineWidth = face ? 3 : 2;
+    if (face) {
+      // 出货后品质色外发光呼吸（稀有以上更有"出货"质感）
+      ctx.shadowColor = tier.color;
+      ctx.shadowBlur = (12 + 6 * Math.sin(Date.now() / 180)) * this.shadowScale;
+    }
+    this.roundRect(-cw / 2 + 1, -ch / 2 + 1, cw - 2, ch - 2, 18); ctx.stroke();
+    ctx.shadowBlur = 0;
+
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    if (!face) {
+      // 卡背
+      ctx.fillStyle = '#ffd54f';
+      ctx.font = 'bold 30px ' + APPLE_FONT;
+      // 图标资产 v3：卡背星芒 ✦ → icon-sparkle.png
+      this._drawPngIcon('sparkle', 0, -22, 34);
+      ctx.fillStyle = 'rgba(255,255,255,0.85)';
+      ctx.font = 'bold 18px ' + APPLE_FONT;
+      ctx.fillText('陀螺抽卡', 0, 28);
+      ctx.fillStyle = 'rgba(255,255,255,0.45)';
+      ctx.font = '12px ' + APPLE_FONT;
+      ctx.fillText('即将揭晓…', 0, 56);
+    } else {
+      // 卡面：旋转陀螺 + 品质 + Lv
+      ctx.save();
+      ctx.rotate(t * 3);
+      drawBeyblade(ctx, 0, -ch * 0.20, bb, Math.min(1.7, cw / 110));
+      ctx.restore();
+      ctx.fillStyle = tier.color;
+      ctx.font = 'bold 20px ' + APPLE_FONT;
+      if (isLegend) {
+        // 图标资产 v3：★ 传说陀螺 ★ → icon-star.png 两侧徽章
+        const lTxt = '传说陀螺';
+        const lTw = mtW(ctx, lTxt);
+        ctx.fillText(lTxt, 0, ch * 0.30);
+        this._drawPngIcon('star', -lTw / 2 - 17, ch * 0.30, 15);
+        this._drawPngIcon('star', lTw / 2 + 17, ch * 0.30, 15);
+      } else {
+        ctx.fillText(tier.name + '陀螺', 0, ch * 0.30);
+      }
+      ctx.fillStyle = '#ffffff';
+      ctx.font = 'bold 13px ' + APPLE_FONT;
+      ctx.fillText('Lv' + bb.level + ' · 战力 ' + bb.power, 0, ch * 0.30 + 26);
+    }
+    ctx.restore();
+
+    // 出货光效：reveal 瞬间品质色爆闪环 + 星尘粒子（仅触发一次）
+    if (revealDone && !dc._fxDone) {
+      dc._fxDone = true;
+      this.addRing(cx, cy, tier.color);
+      this.addParticles(cx, cy - 16, tier.color, isLegend ? 38 : 24);
+      this.addParticles(cx, cy, '#ffffff', isLegend ? 16 : 9);
+      if (isLegend) {
+        // 传说专属：全屏金色粒子雨（多点爆开模拟金色星尘雨）+ 震屏
+        for (let i = 0; i < 9; i++) {
+          this.addParticles(Math.random() * w, Math.random() * h * 0.4, (i % 2) ? '#ffd54f' : '#ffb300', 6);
+        }
+        this.addRing(cx, cy, '#ffd54f');
+        this.addParticles(cx, cy - 44, '#ffd54f', 28);
+        this.shake(10, 0.5);
+      }
+    }
+
+    // 确认按钮（翻转完成后出现）
+    if (revealDone) {
+      const btnW = 170, btnH = 44;
+      const btnY = cy + ch / 2 + 34;
+      const btn = { x: cx - btnW / 2, y: btnY, w: btnW, h: btnH, action: 'draw_close' };
+      this.drawButton(btn.x, btn.y, btn.w, btn.h, '收入背包', isLegend ? '#ff9800' : '#2196f3');
+      this.modalRects.push(btn);
+    }
+  }
+
+  // 出售二次确认弹窗（防止误触出售陀螺）
+  drawSellConfirm() {
+    const ctx = this.ctx, w = this.width, h = this.height;
+    const sc = this.game.sellConfirm;
+    if (!sc) return;
+    this.beginPanelAnim(this.game.sellT || 0, 0.2, 0.85);
+    const bw = Math.min(300, w - 60), bh = 260;
+    const bx = (w - bw) / 2, by = this._panelCenterY(bh);
+    this.drawPanelBody({ bx, by, bw, bh, key: 'sellC', bgFrom: 'rgba(74,20,40,0.98)', bgTo: 'rgba(40,10,30,0.98)' });
+
+    // 标题
+    ctx.fillStyle = '#ff8a80';
+    ctx.font = 'bold 20px ' + APPLE_FONT;
+    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.fillText('确认出售', w / 2, by + 36);
+    // 警告副标题
+    ctx.fillStyle = 'rgba(255,255,255,0.6)';
+    ctx.font = '11px ' + APPLE_FONT;
+    ctx.fillText('出售后陀螺将消失，无法恢复', w / 2, by + 58);
+
+    // 陀螺预览
+    const bb = sc.beyblade;
+    const topY = by + 100;
+    drawBeyblade(ctx, w / 2, topY, bb, 0.9);
+    // 陀螺品质名
+    ctx.fillStyle = bb.tier.color;
+    ctx.font = 'bold 13px ' + APPLE_FONT;
+    ctx.fillText(bb.tier.name + ' Lv.' + bb.level, w / 2, topY + 42);
+
+    // 出售金币
+    ctx.fillStyle = '#ffd54f';
+    ctx.font = 'bold 16px ' + APPLE_FONT;
+    if (!this._drawPngIcon('coin', w / 2 - 30, by + bh - 68, 16)) {
+      drawVectorIcon(ctx, 'coin', w / 2 - 30, by + bh - 68, 16, '#FFD700');
+    }
+    ctx.fillText('+' + sc.gain + ' 金币', w / 2 + 10, by + bh - 68);
+
+    // 按钮：取消 / 确认出售
+    const btnW = (bw - 48) / 2, btnH = 40;
+    const btnY = by + bh - 52;
+    const cancelBtn = { x: bx + 16, y: btnY, w: btnW, h: btnH, action: 'sell_cancel' };
+    const confirmBtn = { x: bx + bw - 16 - btnW, y: btnY, w: btnW, h: btnH, action: 'sell_confirm' };
+    this.drawButton(cancelBtn.x, cancelBtn.y, cancelBtn.w, cancelBtn.h, '取消', '#757575');
+    this.drawButton(confirmBtn.x, confirmBtn.y, confirmBtn.w, confirmBtn.h, '确认出售', '#e53935');
+    this.modalRects.push(cancelBtn, confirmBtn);
+    ctx.restore();
+  }
+
+  drawSignin() {
+    const ctx = this.ctx, w = this.width, h = this.height;
+    this.beginPanelAnim(this.game.signT || 0);
+    const bw = Math.min(340, w - 40), bh = 372;
+    const bx = (w - bw) / 2, by = this._panelCenterY(bh);
+
+    this.drawPanelBody({ bx, by, bw, bh, key: 'sign' });
+    this.drawCloseX('sign_close', bx, by, bw);
+
+    // 标题 + 连续天数
+    ctx.fillStyle = '#fff';
+    ctx.font = 'bold 20px ' + APPLE_FONT;
+    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.fillText('每日签到', w / 2, by + 34);
+    ctx.fillStyle = this.game.signBonus ? '#ffd54f' : 'rgba(255,213,79,0.9)';
+    ctx.font = 'bold 13px ' + APPLE_FONT;
+    // 签到升级版（play-design v1）：连续满 7 天进入双倍日
+    // 图标资产 v3：双倍日尾部 ★ → icon-star.png
+    const streakTxt = '连续 ' + (this.game.signStreak || 0) + ' 天' + (this.game.signBonus ? ' · 双倍日进行中' : ' · 七日循环');
+    ctx.fillText(streakTxt, w / 2, by + 58);
+    if (this.game.signBonus) {
+      const stw = mtW(ctx, streakTxt);
+      this._drawPngIcon('star', w / 2 + stw / 2 + 10, by + 58, 11);
+    }
+
+    // 7 天奖励格子（4 + 3 排）
+    const cellW = 60, cellH = 62, gap = 8;
+    const rowY0 = by + 84, rowY1 = by + 150;
+    const positions = [];
+    for (let d = 1; d <= 7; d++) {
+      const idx = d - 1, col = idx % 4, row = Math.floor(idx / 4);
+      const count = row === 0 ? 4 : 3;
+      const rowW = count * cellW + (count - 1) * gap;
+      const rowX = (w - rowW) / 2;
+      positions.push({ x: rowX + col * (cellW + gap), y: row === 0 ? rowY0 : rowY1 });
+    }
+    const todayDay = (this.game.signDay % 7) + 1;
+    const claimed = this.game.signClaimed;
+    const t = Date.now() / 300;
+    for (let d = 1; d <= 7; d++) {
+      const p = positions[d - 1];
+      const r = SIGN_REWARDS[d - 1];
+      const signed = d <= this.game.signDay;
+      const isToday = !claimed && d === todayDay;
+      const isLegend = d === 7;
+
+      // 底：大奖金色渐变 / 今日呼吸 / 已签微金 / 默认
+      if (isLegend) {
+        const lg = this._grad('signl|' + Math.round(p.x) + '|' + Math.round(p.y) + '|' + Math.round(cellH), () => {
+          const gg = ctx.createLinearGradient(p.x, p.y, p.x, p.y + cellH);
+          gg.addColorStop(0, 'rgba(255,193,7,0.42)');
+          gg.addColorStop(1, 'rgba(255,152,0,0.18)');
+          return gg;
+        });
+        ctx.fillStyle = lg;
+      } else if (signed) {
+        ctx.fillStyle = 'rgba(255,213,79,0.16)';
+      } else if (isToday) {
+        ctx.fillStyle = 'rgba(255,213,79,0.22)';
+      } else {
+        ctx.fillStyle = 'rgba(255,255,255,0.06)';
+      }
+      this.roundRect(p.x, p.y, cellW, cellH, 12); ctx.fill();
+
+      // 边：今日金色呼吸环
+      ctx.lineWidth = isToday ? 2.5 : 1.5;
+      if (isToday) {
+        ctx.strokeStyle = '#ffd54f';
+        ctx.globalAlpha = 0.7 + 0.3 * Math.sin(t * Math.PI * 2);
+      } else {
+        ctx.strokeStyle = isLegend ? '#ffb300' : (signed ? '#ffd54f' : 'rgba(255,255,255,0.22)');
+        ctx.globalAlpha = 1;
+      }
+      this.roundRect(p.x + 0.75, p.y + 0.75, cellW - 1.5, cellH - 1.5, 12); ctx.stroke();
+      ctx.globalAlpha = 1;
+
+      // 第N天 + 奖励
+      ctx.fillStyle = '#fff'; ctx.font = 'bold 12px ' + APPLE_FONT;
+      ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+      ctx.fillText('第' + d + '天', p.x + cellW / 2, p.y + 14);
+      ctx.fillStyle = '#ffd54f'; ctx.font = 'bold 11px ' + APPLE_FONT;
+      const rewardType = r.beyblade ? 'beyblade' : (r.coins ? 'coin' : 'bolt');
+      const rewardVal = r.beyblade ? '' : (r.coins ? '+' + r.coins : '+' + r.energy);
+      if (rewardType === 'beyblade') {
+        ctx.fillText('传说陀螺', p.x + cellW / 2, p.y + 34);
+        // 签到升级版：第 7 天大奖附传说保底券
+        ctx.fillStyle = 'rgba(255,213,79,0.9)';
+        ctx.font = 'bold 8px ' + APPLE_FONT;
+        ctx.fillText('保底券', p.x + cellW / 2, p.y + 56);
+        ctx.fillStyle = '#ffd54f';
+      } else {
+        const icoS = 12;
+        const icoX = p.x + cellW / 2 - (icoS + mtW(ctx, rewardVal)) / 2;
+        // 奖励图标：coin→金币 PNG / bolt→能量 PNG
+        const rwKey = rewardType === 'bolt' ? 'energy' : 'coin';
+        if (!this._drawPngIcon(rwKey, icoX + icoS / 2, p.y + 34, icoS)) {
+          drawVectorIcon(ctx, rewardType, icoX + icoS / 2, p.y + 34, icoS, '#FFD700');
+        }
+        ctx.textAlign = 'left';
+        ctx.fillText(rewardVal, icoX + icoS + 2, p.y + 34);
+        ctx.textAlign = 'center';
+      }
+      // 状态：已签 ✓ / 今日可领 / 未解锁 / 大奖角标
+      if (isLegend) {
+        ctx.fillStyle = '#ffd54f'; ctx.font = 'bold 10px ' + APPLE_FONT;
+        // 图标资产 v3：★大奖 → icon-star + 大奖
+        ctx.fillText('大奖', p.x + cellW / 2 + 8, p.y + 50);
+        this._drawPngIcon('star', p.x + cellW / 2 - 15, p.y + 50, 13);
+      } else if (signed) {
+        if (!this._drawPngIcon('check', p.x + cellW / 2, p.y + 50, 14)) drawVectorIcon(ctx, 'check', p.x + cellW / 2, p.y + 50, 14, '#00e676');
+      }
+      else if (isToday) { ctx.fillStyle = '#ffd54f'; ctx.font = '11px ' + APPLE_FONT; ctx.fillText('可领', p.x + cellW / 2, p.y + 50); }
+      else { ctx.fillStyle = 'rgba(255,255,255,0.40)'; ctx.font = '11px ' + APPLE_FONT; ctx.fillText('未解锁', p.x + cellW / 2, p.y + 50); }
+    }
+
+    // 明日预告行
+    const tomorrowDay = (todayDay % 7) + 1;
+    const tr = SIGN_REWARDS[tomorrowDay - 1];
+    const prevY = by + 224, prevH = 30;
+    ctx.fillStyle = 'rgba(255,255,255,0.07)';
+    this.roundRect(bx + 16, prevY, bw - 32, prevH, 15); ctx.fill();
+    ctx.strokeStyle = 'rgba(255,213,79,0.35)'; ctx.lineWidth = 1;
+    this.roundRect(bx + 16.5, prevY + 0.5, bw - 33, prevH - 1, 15); ctx.stroke();
+    ctx.fillStyle = 'rgba(255,255,255,0.75)';
+    ctx.font = '12px ' + APPLE_FONT;
+    ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
+    ctx.fillText('明日 · 第' + tomorrowDay + '天', bx + 30, prevY + prevH / 2);
+    ctx.fillStyle = '#ffd54f'; ctx.font = 'bold 12px ' + APPLE_FONT;
+    ctx.textAlign = 'right';
+    // 图标资产 v3：★ 传说陀螺+保底券 → 去 ★ 前缀，文本前补 icon-star
+    const previewTxt = tr.beyblade ? '传说陀螺+保底券' : (tr.coins ? '+' + tr.coins + ' 金币' : '+' + tr.energy + ' 能量');
+    ctx.fillText(previewTxt, bx + bw - 30, prevY + prevH / 2);
+    if (tr.beyblade) {
+      const ptw = mtW(ctx, previewTxt);
+      this._drawPngIcon('star', bx + bw - 30 - ptw - 15, prevY + prevH / 2, 12);
+    }
+
+    // 断签补签按钮（签到升级版：看广告补签，保持连续签到）
+    const canMakeup = (typeof this.game.canMakeupSign === 'function') && this.game.canMakeupSign();
+    if (canMakeup) {
+      const mkW = 92, mkH = 26;
+      const mkRect = { x: (w - mkW) / 2, y: prevY + prevH + 8, w: mkW, h: mkH, action: 'sign_makeup' };
+      this.drawButton(mkRect.x, mkRect.y, mkRect.w, mkRect.h, '补签昨天', '#9575cd');
+      this.modalRects.push(mkRect);
+    }
+
+    // 领取按钮
+    const btnW = 150, btnH = 42;
+    const btnRect = { x: (w - btnW) / 2, y: by + bh - 54, w: btnW, h: btnH, action: claimed ? 'sign_close' : 'sign_claim' };
+    this.drawButton(btnRect.x, btnRect.y, btnRect.w, btnRect.h, claimed ? '今日已领取' : '领取奖励', claimed ? '#7e57c2' : '#ffb300');
+    this.modalRects.push(btnRect);
+    ctx.restore();
+  }
+
+  // =====================================================
+  // 每日挑战面板（play-design v1）：3 个日常任务 + 活跃度 + 当日宝箱
+  // =====================================================
+  drawDailyPanel() {
+    const ctx = this.ctx, w = this.width, h = this.height;
+    if (typeof this.game._checkDailyReset === 'function') this.game._checkDailyReset();
+    const meta = this.game.dailyTasksMeta();
+    const active = Math.max(0, Math.min(100, this.game.dailyActive || 0));
+    const chestClaimed = !!this.game.dailyChestClaimed;
+    const chestReady = active >= 100 && !chestClaimed;
+
+    this.beginPanelAnim(this.game.dailyT || 0);
+    const bw = Math.min(340, w - 40), bh = 430;
+    const bx = (w - bw) / 2, by = this._panelCenterY(bh);
+
+    this.drawPanelBody({ bx, by, bw, bh, key: 'daily' });
+    this.drawCloseX('daily_close', bx, by, bw);
+
+    // 标题 + 副标题
+    ctx.fillStyle = '#fff';
+    ctx.font = 'bold 20px ' + APPLE_FONT;
+    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.fillText('每日挑战', w / 2, by + 34);
+    ctx.fillStyle = 'rgba(209,196,233,0.92)';
+    ctx.font = '11px ' + APPLE_FONT;
+    ctx.fillText('对战 3 局 · 合成 3 次 · 抽卡 3 次', w / 2, by + 58);
+
+    // 3 个任务行
+    const rowX = bx + 16, rowW = bw - 32, rowH = 50, rowGap = 9;
+    let ry = by + 76;
+    for (let i = 0; i < meta.length; i++) {
+      const m = meta[i];
+      const done = m.cur >= m.goal;
+      // 行底
+      ctx.fillStyle = done ? 'rgba(255,213,79,0.12)' : 'rgba(255,255,255,0.07)';
+      this.roundRect(rowX, ry, rowW, rowH, 12); ctx.fill();
+      ctx.strokeStyle = done ? 'rgba(255,213,79,0.5)' : 'rgba(255,255,255,0.16)';
+      ctx.lineWidth = 1;
+      this.roundRect(rowX + 0.5, ry + 0.5, rowW - 1, rowH - 1, 12); ctx.stroke();
+      // 图标
+      if (!this._drawPngIcon(m.icon, rowX + 24, ry + rowH / 2, 27)) {
+        drawVectorIcon(ctx, m.key === 'battle' ? 'clash' : (m.key === 'merge' ? 'merge' : 'draw'), rowX + 24, ry + rowH / 2, 22, '#ffd54f');
+      }
+      // 名称
+      ctx.fillStyle = '#fff';
+      ctx.font = 'bold 13px ' + APPLE_FONT;
+      ctx.textAlign = 'left';
+      ctx.fillText(m.name + ' 任务', rowX + 44, ry + rowH / 2 - 8);
+      // 进度条
+      const barW = rowW - 44 - 78, barX = rowX + 44, barY = ry + rowH / 2 + 6;
+      const barH = 6;
+      ctx.fillStyle = 'rgba(255,255,255,0.14)';
+      this.roundRect(barX, barY, barW, barH, barH / 2); ctx.fill();
+      const p = Math.min(1, m.cur / m.goal);
+      if (p > 0) {
+        const bg2 = this._grad('dbar|' + i + '|' + Math.round(barX), () => {
+          const gg = ctx.createLinearGradient(barX, barY, barX + barW, barY);
+          gg.addColorStop(0, '#ffd54f');
+          gg.addColorStop(1, '#ff9800');
+          return gg;
+        });
+        ctx.fillStyle = bg2;
+        this.roundRect(barX, barY, Math.max(6, barW * p), barH, barH / 2); ctx.fill();
+      }
+      ctx.fillStyle = done ? '#ffd54f' : 'rgba(255,255,255,0.75)';
+      ctx.font = 'bold 10px ' + APPLE_FONT;
+      ctx.fillText(m.cur + '/' + m.goal, barX + barW + 6, ry + rowH / 2 + 6);
+      // 完成态 / 活跃度标签（右侧）
+      if (done) {
+        if (!this._drawPngIcon('check', rowX + rowW - 22, ry + rowH / 2, 18)) drawVectorIcon(ctx, 'check', rowX + rowW - 22, ry + rowH / 2, 18, '#00e676');
+      } else {
+        ctx.fillStyle = '#ffd54f';
+        ctx.font = 'bold 10px ' + APPLE_FONT;
+        ctx.textAlign = 'right';
+        ctx.fillText('+' + m.active + ' 活跃', rowX + rowW - 12, ry + rowH / 2);
+        ctx.textAlign = 'left';
+      }
+      ry += rowH + rowGap;
+    }
+
+    // 活跃度区
+    const ay = ry + 2;
+    ctx.fillStyle = 'rgba(255,255,255,0.07)';
+    this.roundRect(rowX, ay, rowW, 56, 12); ctx.fill();
+    ctx.fillStyle = '#fff';
+    ctx.font = 'bold 12px ' + APPLE_FONT;
+    ctx.textAlign = 'left';
+    ctx.fillText('今日活跃', rowX + 16, ay + 18);
+    ctx.fillStyle = '#ffd54f';
+    ctx.textAlign = 'right';
+    ctx.fillText(active + ' / 100', rowX + rowW - 16, ay + 18);
+    // 活跃度进度条
+    const aBarX = rowX + 16, aBarW = rowW - 32, aBarY = ay + 32, aBarH = 10;
+    ctx.fillStyle = 'rgba(255,255,255,0.16)';
+    this.roundRect(aBarX, aBarY, aBarW, aBarH, aBarH / 2); ctx.fill();
+    if (active > 0) {
+      const ag = this._grad('dact|' + Math.round(aBarX), () => {
+        const gg = ctx.createLinearGradient(aBarX, aBarY, aBarX + aBarW, aBarY);
+        gg.addColorStop(0, '#ffd54f');
+        gg.addColorStop(1, '#ff9100');
+        return gg;
+      });
+      ctx.fillStyle = ag;
+      this.roundRect(aBarX, aBarY, Math.max(10, aBarW * active / 100), aBarH, aBarH / 2); ctx.fill();
+    }
+    ctx.strokeStyle = 'rgba(255,213,79,0.4)'; ctx.lineWidth = 1;
+    this.roundRect(aBarX + 0.5, aBarY + 0.5, aBarW - 1, aBarH - 1, aBarH / 2); ctx.stroke();
+
+    // 当日宝箱
+    const chestY = ay + 68;
+    ctx.fillStyle = 'rgba(255,255,255,0.07)';
+    this.roundRect(rowX, chestY, rowW, 62, 12); ctx.fill();
+    ctx.strokeStyle = chestReady ? 'rgba(255,213,79,0.7)' : 'rgba(255,255,255,0.16)';
+    ctx.lineWidth = 1.5;
+    this.roundRect(rowX + 0.75, chestY + 0.75, rowW - 1.5, 62 - 1.5, 12); ctx.stroke();
+    // 宝箱图标
+    const chestIco = 40;
+    if (!this._drawPngIcon('chest', rowX + 34, chestY + 31, chestIco)) drawVectorIcon(ctx, 'chest', rowX + 34, chestY + 31, 30, chestReady ? '#ffd54f' : '#9e9e9e');
+    // 状态文字
+    ctx.fillStyle = '#fff';
+    ctx.font = 'bold 12px ' + APPLE_FONT;
+    ctx.textAlign = 'left';
+    ctx.fillText(chestClaimed ? '今日宝箱已领取' : (chestReady ? '宝箱可开启！' : '活跃满 100 开启当日宝箱'), rowX + 62, chestY + 20);
+    ctx.fillStyle = 'rgba(255,255,255,0.6)';
+    ctx.font = '10px ' + APPLE_FONT;
+    ctx.fillText(chestClaimed ? '明日 5:00 刷新' : '随机 金币 / 能量 / 稀有陀螺', rowX + 62, chestY + 40);
+    // 领取按钮
+    const cBtnW = 74, cBtnH = 34;
+    const cBtn = { x: rowX + rowW - cBtnW - 10, y: chestY + (62 - cBtnH) / 2, w: cBtnW, h: cBtnH, action: 'daily_claim' };
+    this.drawButton(cBtn.x, cBtn.y, cBtn.w, cBtn.h, chestClaimed ? '已领' : (chestReady ? '开启' : '未解锁'), chestReady ? '#ffb300' : '#7b7f8a');
+    this.modalRects.push(cBtn);
+
+    ctx.restore();
+  }
+
+  // =====================================================
+  // 竞技场天梯面板（play-design v1）：当前段位 + 积分进度 + 本周最高分 + 段位奖励表
+  // =====================================================
+  drawArenaPanel() {
+    const ctx = this.ctx, w = this.width, h = this.height;
+    const meta = this.game.arenaMeta();
+    const tiers = this.game.constructor.arenaTiers();
+    const isMaster = meta.tierIndex >= tiers.length - 1;
+
+    this.beginPanelAnim(this.game.arenaT || 0);
+    const bw = Math.min(350, w - 30), bh = 452;
+    const bx = (w - bw) / 2, by = this._panelCenterY(bh);
+
+    this.drawPanelBody({ bx, by, bw, bh, key: 'arena' });
+    this.drawCloseX('arena_close', bx, by, bw);
+
+    // 标题 + 副标题
+    ctx.fillStyle = '#fff';
+    ctx.font = 'bold 20px ' + APPLE_FONT;
+    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.fillText('竞技场天梯', w / 2, by + 34);
+    ctx.fillStyle = 'rgba(209,196,233,0.92)';
+    ctx.font = '11px ' + APPLE_FONT;
+    ctx.fillText('周赛 · 每局胜利得竞技积分 · 周结算发段位奖励', w / 2, by + 58);
+
+    // 当前段位区
+    const tierY = by + 84;
+    // 段位图标（大）
+    const bigIco = isMaster ? 72 : 64;
+    const tIco = this._drawPngIcon(meta.tierIcon, bx + 62, tierY, bigIco);
+    if (!tIco) {
+      ctx.fillStyle = meta.tierColor;
+      ctx.beginPath(); ctx.arc(bx + 62, tierY, 30, 0, Math.PI * 2); ctx.fill();
+      ctx.fillStyle = '#1a0f33'; ctx.font = 'bold 16px ' + APPLE_FONT;
+      ctx.textAlign = 'center';
+      ctx.fillText(meta.tierName, bx + 62, tierY + 1);
+    }
+    // 段位名 + 状态
+    ctx.textAlign = 'left';
+    ctx.fillStyle = meta.tierColor || '#ffd54f';
+    ctx.font = 'bold 18px ' + APPLE_FONT;
+    ctx.fillText(meta.tierName + '段位', bx + 106, tierY - 12);
+    ctx.fillStyle = 'rgba(255,255,255,0.78)';
+    ctx.font = '11px ' + APPLE_FONT;
+    if (isMaster) {
+      ctx.fillText('巅峰大师 · 专属金辉称号', bx + 106, tierY + 8);
+    } else {
+      ctx.fillText('距 ' + meta.nextName + ' 还需 ' + meta.toNext + ' 积分', bx + 106, tierY + 8);
+    }
+    // 赛季剩余
+    ctx.fillStyle = 'rgba(255,255,255,0.6)';
+    ctx.font = '10px ' + APPLE_FONT;
+    ctx.fillText('赛季剩余 ' + meta.remainDays + ' 天', bx + 106, tierY + 26);
+
+    // 积分进度条（青铜→大师）
+    const pBarX = bx + 16, pBarW = bw - 32, pBarY = tierY + 46, pBarH = 12;
+    const maxPts = tiers[tiers.length - 1].pts;
+    const prog = Math.min(1, meta.pts / maxPts);
+    ctx.fillStyle = 'rgba(255,255,255,0.14)';
+    this.roundRect(pBarX, pBarY, pBarW, pBarH, pBarH / 2); ctx.fill();
+    if (prog > 0) {
+      const ag = this._grad('aprog|' + Math.round(pBarX), () => {
+        const gg = ctx.createLinearGradient(pBarX, pBarY, pBarX + pBarW, pBarY);
+        gg.addColorStop(0, '#ffd54f');
+        gg.addColorStop(1, meta.tierColor || '#ff9800');
+        return gg;
+      });
+      ctx.fillStyle = ag;
+      this.roundRect(pBarX, pBarY, Math.max(12, pBarW * prog), pBarH, pBarH / 2); ctx.fill();
+    }
+    ctx.strokeStyle = 'rgba(255,213,79,0.4)'; ctx.lineWidth = 1;
+    this.roundRect(pBarX + 0.5, pBarY + 0.5, pBarW - 1, pBarH - 1, pBarH / 2); ctx.stroke();
+    // 刻度点（6 段）
+    for (let i = 0; i < tiers.length; i++) {
+      const tx = pBarX + pBarW * (tiers[i].pts / maxPts);
+      ctx.fillStyle = i <= meta.tierIndex ? '#ffd54f' : 'rgba(255,255,255,0.4)';
+      ctx.beginPath(); ctx.arc(tx, pBarY + pBarH / 2, 3, 0, Math.PI * 2); ctx.fill();
+    }
+    ctx.fillStyle = 'rgba(255,255,255,0.85)';
+    ctx.font = 'bold 11px ' + APPLE_FONT;
+    ctx.textAlign = 'center';
+    ctx.fillText('竞技积分 ' + meta.pts + ' / ' + maxPts, bx + bw / 2, pBarY + pBarH + 16);
+    ctx.fillStyle = 'rgba(255,255,255,0.6)';
+    ctx.font = '10px ' + APPLE_FONT;
+    ctx.fillText('本周最高分 ' + meta.best, bx + bw / 2, pBarY + pBarH + 30);
+
+    // 段位奖励表（6 档横向徽章）
+    const rY = pBarY + pBarH + 46;
+    const cellW = (bw - 40) / 6, cellH = 64;
+    ctx.textAlign = 'center';
+    for (let i = 0; i < tiers.length; i++) {
+      const tx = bx + 20 + cellW * i + cellW / 2;
+      const t2 = tiers[i];
+      const reached = i <= meta.tierIndex;
+      // 槽
+      ctx.fillStyle = reached ? 'rgba(255,213,79,0.12)' : 'rgba(255,255,255,0.05)';
+      this.roundRect(tx - cellW / 2 + 3, rY, cellW - 6, cellH, 9); ctx.fill();
+      ctx.strokeStyle = reached ? 'rgba(255,213,79,0.5)' : 'rgba(255,255,255,0.12)';
+      ctx.lineWidth = 1;
+      this.roundRect(tx - cellW / 2 + 3.5, rY + 0.5, cellW - 7, cellH - 1, 9); ctx.stroke();
+      // 段位图标
+      if (reached) this._drawPngIcon(t2.icon, tx, rY + 22, 26);
+      else {
+        ctx.fillStyle = 'rgba(255,255,255,0.16)';
+        ctx.beginPath(); ctx.arc(tx, rY + 22, 12, 0, Math.PI * 2); ctx.fill();
+      }
+      // 段位名
+      ctx.fillStyle = reached ? (t2.color || '#ffd54f') : 'rgba(255,255,255,0.4)';
+      ctx.font = 'bold 10px ' + APPLE_FONT;
+      ctx.fillText(t2.name, tx, rY + 42);
+      // 奖励
+      ctx.fillStyle = reached ? 'rgba(255,255,255,0.8)' : 'rgba(255,255,255,0.32)';
+      ctx.font = '9px ' + APPLE_FONT;
+      const rw = t2.reward;
+      ctx.fillText('+' + rw.coins, tx, rY + 54);
+      ctx.fillStyle = reached ? 'rgba(255,213,79,0.9)' : 'rgba(255,255,255,0.3)';
+      ctx.fillText(rw.energy ? '+' + rw.energy : ' ', tx, rY + 62);
+    }
+    // 说明条
+    const tipY = rY + cellH + 8;
+    ctx.fillStyle = 'rgba(255,255,255,0.07)';
+    this.roundRect(bx + 16, tipY, bw - 32, 26, 13); ctx.fill();
+    ctx.fillStyle = 'rgba(255,255,255,0.6)';
+    ctx.font = '10px ' + APPLE_FONT;
+    ctx.textAlign = 'center';
+    ctx.fillText('每周一自动按当前段位结算发放奖励，积分重置', bx + bw / 2, tipY + 13);
+
+    ctx.restore();
+  }
+
+  // =====================================================
+  // 大师等级面板（play-design v1）：等级 + 经验进度 + 升级福利 + 里程碑
+  // =====================================================
+  drawLevelPanel() {
+    const ctx = this.ctx, w = this.width, h = this.height;
+    const lm = this.game.levelMeta();
+
+    this.beginPanelAnim(this.game.levelT || 0);
+    const bw = Math.min(330, w - 40), bh = 400;
+    const bx = (w - bw) / 2, by = this._panelCenterY(bh);
+
+    this.drawPanelBody({ bx, by, bw, bh, key: 'level' });
+    this.drawCloseX('level_close', bx, by, bw);
+
+    // 标题 + 副标题
+    ctx.fillStyle = '#fff';
+    ctx.font = 'bold 20px ' + APPLE_FONT;
+    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.fillText('大师等级', w / 2, by + 34);
+    ctx.fillStyle = 'rgba(209,196,233,0.92)';
+    ctx.font = '11px ' + APPLE_FONT;
+    ctx.fillText('对战 / 合成 / 抽卡都能积累经验', w / 2, by + 58);
+
+    // 等级大徽章
+    const lvY = by + 104;
+    ctx.fillStyle = 'rgba(255,213,79,0.14)';
+    ctx.beginPath(); ctx.arc(bx + 62, lvY, 34, 0, Math.PI * 2); ctx.fill();
+    ctx.strokeStyle = '#ffd54f'; ctx.lineWidth = 2;
+    ctx.beginPath(); ctx.arc(bx + 62, lvY, 34, 0, Math.PI * 2); ctx.stroke();
+    ctx.fillStyle = '#ffd54f';
+    ctx.font = 'bold 10px ' + APPLE_FONT;
+    ctx.textAlign = 'center';
+    ctx.fillText('Lv', bx + 62, lvY - 12);
+    ctx.font = 'bold 28px ' + APPLE_FONT;
+    ctx.fillText(String(lm.level), bx + 62, lvY + 10);
+
+    // 等级名 + 经验
+    ctx.textAlign = 'left';
+    ctx.fillStyle = '#fff';
+    ctx.font = 'bold 16px ' + APPLE_FONT;
+    ctx.fillText('陀螺大师 Lv.' + lm.level, bx + 110, lvY - 10);
+    ctx.fillStyle = 'rgba(255,255,255,0.7)';
+    ctx.font = '11px ' + APPLE_FONT;
+    ctx.fillText('能量上限 ' + lm.cap + ' · 每升一级 +5', bx + 110, lvY + 12);
+
+    // 经验进度条
+    const pBarX = bx + 16, pBarW = bw - 32, pBarY = lvY + 40, pBarH = 12;
+    const prog = Math.max(0, Math.min(1, lm.inLv / Math.max(1, lm.need)));
+    ctx.fillStyle = 'rgba(255,255,255,0.14)';
+    this.roundRect(pBarX, pBarY, pBarW, pBarH, pBarH / 2); ctx.fill();
+    if (prog > 0) {
+      const ag = this._grad('lprog|' + Math.round(pBarX), () => {
+        const gg = ctx.createLinearGradient(pBarX, pBarY, pBarX + pBarW, pBarY);
+        gg.addColorStop(0, '#00e676');
+        gg.addColorStop(1, '#69f0ae');
+        return gg;
+      });
+      ctx.fillStyle = ag;
+      this.roundRect(pBarX, pBarY, Math.max(12, pBarW * prog), pBarH, pBarH / 2); ctx.fill();
+    }
+    ctx.strokeStyle = 'rgba(255,255,255,0.3)'; ctx.lineWidth = 1;
+    this.roundRect(pBarX + 0.5, pBarY + 0.5, pBarW - 1, pBarH - 1, pBarH / 2); ctx.stroke();
+    ctx.fillStyle = 'rgba(255,255,255,0.85)';
+    ctx.font = 'bold 11px ' + APPLE_FONT;
+    ctx.textAlign = 'center';
+    ctx.fillText(lm.inLv + ' / ' + lm.need + ' 经验', bx + bw / 2, pBarY + pBarH + 16);
+
+    // 里程碑列表
+    const mY = pBarY + pBarH + 34;
+    const ms = [
+      { lv: 5, txt: '史诗保底券（史诗计数清零）' },
+      { lv: 10, txt: '史诗保底券' },
+      { lv: 15, txt: '史诗保底券' },
+      { lv: 20, txt: '传说保底券' }
+    ];
+    ctx.textAlign = 'left';
+    for (let i = 0; i < ms.length; i++) {
+      const m = ms[i];
+      const yy = mY + i * 24;
+      const reached = lm.level >= m.lv;
+      // 里程碑节点
+      ctx.fillStyle = reached ? '#ffd54f' : 'rgba(255,255,255,0.18)';
+      ctx.beginPath(); ctx.arc(bx + 34, yy + 6, 9, 0, Math.PI * 2); ctx.fill();
+      if (reached) {
+        ctx.strokeStyle = '#1a0f33'; ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.moveTo(bx + 30, yy + 6); ctx.lineTo(bx + 34, yy + 10); ctx.lineTo(bx + 39, yy + 2);
+        ctx.stroke();
+      }
+      ctx.fillStyle = reached ? '#fff' : 'rgba(255,255,255,0.45)';
+      ctx.font = 'bold 12px ' + APPLE_FONT;
+      ctx.fillText('Lv.' + m.lv, bx + 52, yy + 7);
+      ctx.fillStyle = reached ? 'rgba(255,255,255,0.85)' : 'rgba(255,255,255,0.45)';
+      ctx.font = '11px ' + APPLE_FONT;
+      ctx.fillText(m.txt, bx + 96, yy + 7);
+    }
+    // 说明
+    const tipY = mY + ms.length * 24 + 8;
+    ctx.fillStyle = 'rgba(255,255,255,0.07)';
+    this.roundRect(bx + 16, tipY, bw - 32, 26, 13); ctx.fill();
+    ctx.fillStyle = 'rgba(255,255,255,0.6)';
+    ctx.font = '10px ' + APPLE_FONT;
+    ctx.textAlign = 'center';
+    ctx.fillText('对战 +50 · 合成 +20 · 抽卡 +10 经验', bx + bw / 2, tipY + 13);
+
+    ctx.restore();
+  }
+
+  // =====================================================
+  // 离线回归礼包（play-design v1）：离线 ≥6h 回归弹窗，能量回满 + 金币；≥24h 升级大礼包
+  // =====================================================
+  drawReturnPanel() {
+    const ctx = this.ctx, w = this.width, h = this.height;
+    const grand = this.game._pendingReturn === 'grand';
+    const hrs = Math.floor((this.game.offlineMs || 0) / 3600000);
+
+    this.beginPanelAnim(this.game.returnT || 0);
+    const bw = Math.min(330, w - 40), bh = grand ? 330 : 300;
+    const bx = (w - bw) / 2, by = this._panelCenterY(bh);
+
+    this.drawPanelBody({ bx, by, bw, bh, key: 'ret' });
+    this.drawCloseX('return_close', bx, by, bw);
+
+    // 标题 + 副标题
+    ctx.fillStyle = '#fff';
+    ctx.font = 'bold 20px ' + APPLE_FONT;
+    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.fillText(grand ? '欢迎归来 · 大礼包' : '欢迎归来', w / 2, by + 36);
+    ctx.fillStyle = 'rgba(209,196,233,0.92)';
+    ctx.font = '11px ' + APPLE_FONT;
+    ctx.fillText('离线 ' + hrs + ' 小时 · 专属回归福利', w / 2, by + 60);
+
+    // 礼包图标
+    const gY = by + 122;
+    const psize = 84;
+    ctx.save();
+    ctx.shadowColor = grand ? '#ffd54f' : '#9575cd';
+    ctx.shadowBlur = (grand ? 22 : 12) * this.shadowScale;
+    if (!this._drawPngIcon('chest', bx + bw / 2, gY, psize)) {
+      ctx.fillStyle = grand ? '#ffb300' : '#7e57c2';
+      ctx.beginPath(); ctx.arc(bx + bw / 2, gY, psize / 2, 0, Math.PI * 2); ctx.fill();
+      ctx.fillStyle = '#fff'; ctx.font = 'bold 30px ' + APPLE_FONT;
+      ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+      // 图标资产 v3：大奖宝箱 ★ → icon-star.png
+      if (grand) {
+        this._drawPngIcon('star', bx + bw / 2, gY + 1, 30);
+      } else {
+        ctx.fillText('礼', bx + bw / 2, gY + 1);
+      }
+    }
+    ctx.restore();
+
+    // 奖励清单
+    const rY = gY + 56;
+    ctx.textAlign = 'center';
+    const items = [
+      { txt: '能量回满', ico: 'energy' },
+      { txt: '+300 金币', ico: 'coin' }
+    ];
+    if (grand) items.push({ txt: '传说保底券', ico: 'check' });
+    const itemW = 90, gap = 8;
+    const total = itemW * items.length + gap * (items.length - 1);
+    let ix = bx + bw / 2 - total / 2 + itemW / 2;
+    for (const it of items) {
+      ctx.fillStyle = 'rgba(255,255,255,0.08)';
+      this.roundRect(ix - itemW / 2, rY, itemW, 54, 12); ctx.fill();
+      ctx.strokeStyle = grand ? 'rgba(255,213,79,0.5)' : 'rgba(255,255,255,0.16)';
+      ctx.lineWidth = 1;
+      this.roundRect(ix - itemW / 2 + 0.5, rY + 0.5, itemW - 1, 53, 12); ctx.stroke();
+      this._drawPngIcon(it.ico, ix, rY + 18, 20);
+      ctx.fillStyle = '#fff';
+      ctx.font = '10px ' + APPLE_FONT;
+      ctx.fillText(it.txt, ix, rY + 42);
+      ix += itemW + gap;
+    }
+
+    // 领取按钮
+    const btnW = 160, btnH = 42;
+    const btn = { x: (w - btnW) / 2, y: by + bh - 56, w: btnW, h: btnH, action: 'return_claim' };
+    this.drawButton(btn.x, btn.y, btn.w, btn.h, grand ? '领取回归大礼包' : '领取回归礼包', '#ffb300');
+    this.modalRects.push(btn);
+
+    ctx.restore();
+  }
+
+  // =====================================================
+  // 批次D·竞技宝箱（play-design v1）：胜利掉宝箱，看广告开 / 直接开
+  // =====================================================
+  drawBattleChestPanel() {
+    const ctx = this.ctx, w = this.width, h = this.height;
+    this.beginPanelAnim(this.game.battleChestT || 0);
+
+    const chest = this.game.battleChest;
+    const qNames = ['青铜宝箱', '白银宝箱', '黄金宝箱'];
+    const qColors = ['#cd9a5b', '#cfd8dc', '#ffd54f'];
+    const q = chest ? chest.quality : 0;
+
+    const bw = Math.min(330, w - 40), bh = 320;
+    const bx = (w - bw) / 2, by = this._panelCenterY(bh);
+    this.drawPanelBody({ bx, by, bw, bh, key: 'chest', border: qColors[q] });
+
+    // 标题
+    ctx.fillStyle = '#fff';
+    ctx.font = 'bold 20px ' + APPLE_FONT;
+    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.fillText(qNames[q], w / 2, by + 34);
+    ctx.fillStyle = 'rgba(209,196,233,0.9)';
+    ctx.font = '11px ' + APPLE_FONT;
+    ctx.fillText('高连击提升宝箱品质 · 内含金币/能量/陀螺', w / 2, by + 56);
+
+    // 宝箱图标（金色呼吸）
+    const chestY = by + 122;
+    ctx.save();
+    const t = (this._frameCount || 0) / 60;
+    ctx.shadowColor = qColors[q];
+    ctx.shadowBlur = (16 + 8 * Math.sin(t * 3)) * this.shadowScale;
+    if (!this._drawPngIcon('chest', w / 2, chestY, 92)) {
+      ctx.fillStyle = qColors[q];
+      ctx.beginPath(); ctx.arc(w / 2, chestY, 46, 0, Math.PI * 2); ctx.fill();
+      ctx.fillStyle = '#fff'; ctx.font = 'bold 32px ' + APPLE_FONT;
+      ctx.fillText('宝', w / 2, chestY + 1);
+    }
+    ctx.restore();
+    ctx.fillStyle = 'rgba(255,255,255,0.6)';
+    ctx.font = '10px ' + APPLE_FONT;
+    ctx.fillText('剩 ' + (chest ? chest.count : 0) + ' 个', w / 2, chestY + 58);
+
+    // 关闭按钮（右上角 ✕）：任何状态下都可关闭弹窗返回游戏，防卡死
+    const closeBtn = { x: bx + bw - 34, y: by + 10, w: 24, h: 24, action: 'chest_close' };
+    this.drawButton(closeBtn.x, closeBtn.y, closeBtn.w, closeBtn.h, '✕', 'rgba(255,255,255,0.18)');
+    this.modalRects.push(closeBtn);
+
+    // 按钮：看广告开（金）/ 直接开（紫）；广告不可用时降级为「免费开启」
+    const btnW = 132, btnH = 40, gap = 10;
+    const totalW = btnW * 2 + gap;
+    const adBroken = !!this.game.chestAdBroken;
+    const adBtn = { x: w / 2 - totalW / 2, y: by + bh - 52, w: btnW, h: btnH, action: adBroken ? 'chest_free_force' : 'chest_ad' };
+    const freeBtn = { x: w / 2 + gap / 2, y: by + bh - 52, w: btnW, h: btnH, action: 'chest_free' };
+    if (adBroken) {
+      this.drawButton(adBtn.x, adBtn.y, adBtn.w, adBtn.h, '免费开启', '#43a047');
+    } else {
+      this.drawButton(adBtn.x, adBtn.y, adBtn.w, adBtn.h, '看广告开', '#ffb300');
+    }
+    this.drawButton(freeBtn.x, freeBtn.y, freeBtn.w, freeBtn.h, '直接开', '#7e57c2');
+    this.modalRects.push(adBtn, freeBtn);
+    ctx.fillStyle = 'rgba(255,255,255,0.5)';
+    ctx.font = '9px ' + APPLE_FONT;
+    if (adBroken) {
+      ctx.fillStyle = 'rgba(129,199,132,0.95)';
+      ctx.fillText('广告暂不可用 · 已切换免费开启', w / 2, by + bh - 18);
+    } else {
+      ctx.fillStyle = 'rgba(255,255,255,0.5)';
+      ctx.fillText('直接开每日限 1 次', w / 2, by + bh - 18);
+    }
+
+    ctx.restore();
+  }
+
+  // =====================================================
+  // 批次D·好友助力（play-design v1）：分享领能量 + 好友榜挑战目标
+  // =====================================================
+  drawBoostPanel() {
+    const ctx = this.ctx, w = this.width, h = this.height;
+    this.beginPanelAnim(this.game.boostT || 0);
+    const bw = Math.min(330, w - 40), bh = 372;
+    const bx = (w - bw) / 2, by = this._panelCenterY(bh);
+    this.drawPanelBody({ bx, by, bw, bh, key: 'boost' });
+    this.drawCloseX('boost_close', bx, by, bw);
+
+    ctx.fillStyle = '#fff';
+    ctx.font = 'bold 20px ' + APPLE_FONT;
+    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.fillText('好友对战 · 助力', w / 2, by + 36);
+    ctx.fillStyle = 'rgba(209,196,233,0.9)';
+    ctx.font = '11px ' + APPLE_FONT;
+    ctx.fillText('分享给好友，回跳领助力能量（每日 5 次）', w / 2, by + 60);
+
+    // 助力能量按钮
+    const canBoost = typeof this.game.canClaimBoost === 'function' && this.game.canClaimBoost();
+    const boostBtn = { x: (w - 180) / 2, y: by + 86, w: 180, h: 40, action: 'boost_claim' };
+    this.drawButton(boostBtn.x, boostBtn.y, boostBtn.w, boostBtn.h, canBoost ? '分享领 +15 能量' : '今日助力已领完', canBoost ? '#ffb300' : '#7e57c2');
+    this.modalRects.push(boostBtn);
+
+    // 好友榜（挑战目标）
+    const fl = typeof this.game.friendList === 'function' ? this.game.friendList() : { friends: [], myHigh: 0 };
+    ctx.fillStyle = 'rgba(255,255,255,0.75)';
+    ctx.font = 'bold 13px ' + APPLE_FONT;
+    ctx.textAlign = 'left';
+    ctx.fillText('好友榜 · 挑战目标', bx + 18, by + 152);
+    ctx.textAlign = 'right';
+    ctx.font = '10px ' + APPLE_FONT;
+    ctx.fillText('我的最高 ' + fl.myHigh, bx + bw - 18, by + 152);
+
+    let fy = by + 176;
+    const E = [
+      { name: '金', color: '#ffc107' },
+      { name: '木', color: '#66bb6a' },
+      { name: '水', color: '#42a5f5' },
+      { name: '火', color: '#ef5350' },
+      { name: '土', color: '#a1887f' },
+    ];
+    const medals = ['金', '银', '铜'];
+    for (let i = 0; i < fl.friends.length; i++) {
+      const f = fl.friends[i];
+      const frY = fy + i * 58;
+      ctx.fillStyle = 'rgba(255,255,255,0.07)';
+      this.roundRect(bx + 16, frY, bw - 32, 50, 12); ctx.fill();
+      ctx.strokeStyle = 'rgba(255,213,79,0.25)'; ctx.lineWidth = 1;
+      this.roundRect(bx + 16.5, frY + 0.5, bw - 33, 49, 12); ctx.stroke();
+      // 名次徽章
+      ctx.fillStyle = i === 0 ? '#ffd54f' : (i === 1 ? '#cfd8dc' : '#cd9a5b');
+      ctx.font = 'bold 12px ' + APPLE_FONT;
+      ctx.textAlign = 'center';
+      ctx.fillText(medals[i], bx + 34, frY + 25);
+      // 元素色点 + 名字
+      ctx.fillStyle = E[f.element].color;
+      ctx.font = 'bold 11px ' + APPLE_FONT;
+      ctx.textAlign = 'left';
+      ctx.fillText(f.name, bx + 54, frY + 25);
+      ctx.fillStyle = 'rgba(255,255,255,0.55)';
+      ctx.font = '10px ' + APPLE_FONT;
+      ctx.fillText('最高分', bx + 54, frY + 42);
+      // 分数（右对齐）
+      ctx.fillStyle = '#ffd54f';
+      ctx.font = 'bold 13px ' + APPLE_FONT;
+      ctx.textAlign = 'right';
+      ctx.fillText(String(f.score), bx + bw - 30, frY + 25);
+    }
+
+    // 说明
+    ctx.fillStyle = 'rgba(255,255,255,0.5)';
+    ctx.font = '9px ' + APPLE_FONT;
+    ctx.textAlign = 'center';
+    ctx.fillText('超越好友最高分，竞技场段位更上一层！', w / 2, by + bh - 16);
+
+    ctx.restore();
+  }
+
+  // 批次D·局前 buff 三选一弹窗
+  drawBuffPanel() {
+    const ctx = this.ctx, w = this.width, h = this.height;
+    this.beginPanelAnim(this.game.buffT || 0);
+    const bw = Math.min(340, w - 40), bh = 458;
+    const bx = (w - bw) / 2, by = this._panelCenterY(bh);
+    this.drawPanelBody({ bx, by, bw, bh, key: 'buff' });
+    this.drawCloseX('buff_close', bx, by, bw);
+
+    ctx.fillStyle = '#fff';
+    ctx.font = 'bold 20px ' + APPLE_FONT;
+    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.fillText('出击准备', w / 2, by + 36);
+    ctx.fillStyle = 'rgba(209,196,233,0.9)';
+    ctx.font = '11px ' + APPLE_FONT;
+    ctx.fillText('本局增益：花金币购买，能量门票 -20', w / 2, by + 60);
+    ctx.fillStyle = '#ffd54f';
+    ctx.font = 'bold 12px ' + APPLE_FONT;
+    ctx.fillText('金币 ' + this.game.coins + '  ·  能量 ' + Math.floor(this.game.energy), w / 2, by + 84);
+
+    // 三项 buff（花费与 main._buffCost 保持一致）
+    const buffs = [
+      { key: 'fullspeed',   label: '满', color: '#ffb300', name: '开局满速',   desc: '开局立即满转速，抢先刷分', cost: 300 },
+      { key: 'targetdown',  label: '标', color: '#ef5350', name: '目标 -10%',  desc: '目标分降低 10%，更易取胜', cost: 500 },
+      { key: 'doublepower', label: '宝', color: '#42a5f5', name: '道具翻倍',   desc: '道具刷新频率翻倍',         cost: 800 },
+    ];
+    const cardX = bx + 16, cardW = bw - 32, cardH = 76, cardGap = 10;
+    const cardY0 = by + 104;
+    for (let i = 0; i < buffs.length; i++) {
+      const b = buffs[i];
+      const cy = cardY0 + i * (cardH + cardGap);
+      const affordable = this.game.coins >= b.cost;
+      // 卡片底
+      ctx.fillStyle = 'rgba(255,255,255,0.07)';
+      this.roundRect(cardX, cy, cardW, cardH, 12); ctx.fill();
+      ctx.strokeStyle = affordable ? 'rgba(255,213,79,0.35)' : 'rgba(255,255,255,0.12)';
+      ctx.lineWidth = 1;
+      this.roundRect(cardX + 0.5, cy + 0.5, cardW - 1, cardH - 1, 12); ctx.stroke();
+      // 左侧徽标
+      ctx.fillStyle = b.color;
+      ctx.beginPath(); ctx.arc(cardX + 30, cy + cardH / 2, 18, 0, Math.PI * 2); ctx.fill();
+      ctx.fillStyle = '#fff';
+      ctx.font = 'bold 16px ' + APPLE_FONT;
+      ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+      ctx.fillText(b.label, cardX + 30, cy + cardH / 2);
+      // 名称 + 描述
+      ctx.textAlign = 'left';
+      ctx.fillStyle = '#fff';
+      ctx.font = 'bold 14px ' + APPLE_FONT;
+      ctx.fillText(b.name, cardX + 58, cy + 26);
+      ctx.fillStyle = 'rgba(255,255,255,0.72)';
+      ctx.font = '10px ' + APPLE_FONT;
+      ctx.fillText(b.desc, cardX + 58, cy + 46);
+      // 购买按钮
+      const buy = { x: cardX + cardW - 86, y: cy + cardH / 2 - 18, w: 74, h: 36, action: 'buff_buy_' + b.key };
+      this.drawButton(buy.x, buy.y, buy.w, buy.h, (affordable ? '' : '✕ ') + b.cost, affordable ? b.color : '#555');
+      this.modalRects.push(buy);
+      // 成本标签（金币图标感）
+      ctx.fillStyle = affordable ? 'rgba(255,213,79,0.95)' : 'rgba(255,255,255,0.4)';
+      ctx.font = 'bold 10px ' + APPLE_FONT;
+      ctx.textAlign = 'center';
+      ctx.fillText('金币', buy.x + buy.w / 2, buy.y - 8);
+    }
+
+    // 免费跳过
+    const skipY = cardY0 + buffs.length * (cardH + cardGap) + 6;
+    const skip = { x: cardX, y: skipY, w: cardW, h: 40, action: 'buff_skip' };
+    this.drawButton(skip.x, skip.y, skip.w, skip.h, '直接开战（不买）', '#66bb6a');
+    this.modalRects.push(skip);
+
+    ctx.restore();
+  }
+
+  // 批次E·连战三选一浮层（复用局前 buff 面板结构，免费叠层）
+  drawRunBuffPanel() {
+    const battle = this.game.battle;
+    const choices = (battle && battle._runBuffChoices) || [];
+    const ctx = this.ctx, w = this.width, h = this.height;
+    this.beginPanelAnim(this.game.runBuffT || 0);
+    const bw = Math.min(340, w - 40), bh = 458;
+    const bx = (w - bw) / 2, by = this._panelCenterY(bh);
+
+    this.drawPanelBody({ bx, by, bw, bh, key: 'runbuff', bgFrom: 'rgba(38,166,154,0.98)', bgTo: 'rgba(0,105,92,0.98)', border: '#80cbc4' });
+
+    ctx.fillStyle = '#fff';
+    ctx.font = 'bold 20px ' + APPLE_FONT;
+    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.fillText('连战 · 选择增益', w / 2, by + 36);
+    ctx.fillStyle = 'rgba(178,223,219,0.9)';
+    ctx.font = '11px ' + APPLE_FONT;
+    const stage = (battle && battle.runStage) || 1;
+    ctx.fillText('已通关 ' + (stage - 1) + ' 关 · 选一张免费叠层，继续第 ' + stage + ' 关', w / 2, by + 60);
+
+    const cardX = bx + 16, cardW = bw - 32, cardH = 76, cardGap = 10;
+    const cardY0 = by + 84;
+    for (let i = 0; i < choices.length; i++) {
+      const b = choices[i];
+      const cy = cardY0 + i * (cardH + cardGap);
+      ctx.fillStyle = 'rgba(255,255,255,0.07)';
+      this.roundRect(cardX, cy, cardW, cardH, 12); ctx.fill();
+      ctx.strokeStyle = 'rgba(128,203,196,0.45)';
+      ctx.lineWidth = 1;
+      this.roundRect(cardX + 0.5, cy + 0.5, cardW - 1, cardH - 1, 12); ctx.stroke();
+      ctx.fillStyle = b.color || '#26a69a';
+      ctx.beginPath(); ctx.arc(cardX + 30, cy + cardH / 2, 18, 0, Math.PI * 2); ctx.fill();
+      ctx.fillStyle = '#fff';
+      ctx.font = 'bold 16px ' + APPLE_FONT;
+      ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+      ctx.fillText(b.label || '?', cardX + 30, cy + cardH / 2);
+      ctx.textAlign = 'left';
+      ctx.fillStyle = '#fff';
+      ctx.font = 'bold 14px ' + APPLE_FONT;
+      ctx.fillText(b.name || '', cardX + 58, cy + 26);
+      ctx.fillStyle = 'rgba(255,255,255,0.72)';
+      ctx.font = '10px ' + APPLE_FONT;
+      ctx.fillText(b.desc || '', cardX + 58, cy + 46);
+      const pick = { x: cardX + cardW - 86, y: cy + cardH / 2 - 18, w: 74, h: 36, action: 'run_buff_' + i };
+      this.drawButton(pick.x, pick.y, pick.w, pick.h, '选择', b.color || '#26a69a');
+      this.modalRects.push(pick);
+    }
+
+    const skipY = cardY0 + choices.length * (cardH + cardGap) + 6;
+    const skip = { x: cardX, y: skipY, w: cardW, h: 40, action: 'run_buff_skip' };
+    this.drawButton(skip.x, skip.y, skip.w, skip.h, '结束连战（保留金币）', '#ef5350');
+    this.modalRects.push(skip);
+    ctx.restore();
+  }
+
+  drawParticles(dt) {
+    const ctx = this.ctx;
+    for (let i = this.particles.length - 1; i >= 0; i--) {
+      const p = this.particles[i];
+      if (!this._debugFreezeFx) {
+        p.life -= dt;
+        p.x += p.vx * dt; p.y += p.vy * dt;
+      }
+      if (p.life <= 0) { this.particles.splice(i, 1); continue; }
+      ctx.globalAlpha = p.life / p.maxLife;
+      ctx.fillStyle = p.color;
+      ctx.beginPath();
+      ctx.arc(p.x, p.y, p.size, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    ctx.globalAlpha = 1;
+
+    // 环形冲击波（合成成功等）
+    if (this.rings) {
+      for (let i = this.rings.length - 1; i >= 0; i--) {
+        const r = this.rings[i];
+        if (!this._debugFreezeFx) {
+          r.radius += (r.maxRadius - r.radius) * dt * 6 + 30 * dt;
+          r.alpha -= dt * 1.2;
+        }
+        if (r.alpha <= 0 || r.radius >= r.maxRadius) { this.rings.splice(i, 1); continue; }
+        ctx.save();
+        ctx.globalAlpha = Math.max(0, r.alpha);
+        ctx.strokeStyle = r.color;
+        ctx.lineWidth = 4;
+        ctx.shadowColor = r.color;
+        ctx.shadowBlur = 16 * this.shadowScale;
+        ctx.beginPath();
+        ctx.arc(r.x, r.y, r.radius, 0, Math.PI * 2);
+        ctx.stroke();
+        ctx.restore();
+      }
+    }
+  }
+
+  addParticles(x, y, color, count = 12) {
+    if (this.particles.length >= 200) return; // 防御性硬上限：UI 粒子过多时丢弃，避免 GC 雪崩
+    const remain = 200 - this.particles.length;
+    if (count > remain) count = remain;
+    for (let i = 0; i < count; i++) {
+      const angle = Math.random() * Math.PI * 2;
+      const speed = 60 + Math.random() * 80;
+      this.particles.push({
+        x, y,
+        vx: Math.cos(angle) * speed,
+        vy: Math.sin(angle) * speed,
+        size: 2 + Math.random() * 3,
+        color,
+        life: 0.4 + Math.random() * 0.4,
+        maxLife: 0.8
+      });
+    }
+  }
+
+  /** 环形扩散冲击波（合成成功 / 升级时用），跟随 renderer 帧更新 */
+  addRing(x, y, color) {
+    if (!this.rings) this.rings = [];
+    this.rings.push({ x, y, color, radius: 8, maxRadius: 90, alpha: 0.8 });
+  }
+
+  /** 震屏反馈（传说出货 / 强力事件时用）：dur 秒内随机偏移、幅度衰减 */
+  shake(mag = 8, dur = 0.4) {
+    this._shakeT = dur;
+    this._shakeDur = dur;
+    this._shakeMag = mag;
+  }
+
+  roundRect(x, y, w, h, r) {
+    const ctx = this.ctx;
+    r = Math.min(r, Math.min(w, h) / 2);
+    ctx.beginPath();
+    ctx.moveTo(x + r, y);
+    ctx.arcTo(x + w, y, x + w, y + h, r);
+    ctx.arcTo(x + w, y + h, x, y + h, r);
+    ctx.arcTo(x, y + h, x, y, r);
+    ctx.arcTo(x, y, x + w, y, r);
+    ctx.closePath();
+  }
+
+  // 游戏圈引导浮层：轻量卡片（动作条上方），每天弹一次，可直达游戏圈产生有效活跃
+  drawClubGuide() {
+    const ctx = this.ctx;
+    const L = this.layout;
+    const W = L.W;
+    const cardW = Math.min(W - 40, 300);
+    const cardH = 64;
+    const bx = (W - cardW) / 2;
+    // 放在动作条（对战/合成/社区）上方，紧邻「社区」按钮，语义清晰
+    const by = L.actionY - cardH - 14;
+    if (by < (L.topBarY + L.topBarH)) return; // 空间不足则不挡标题
+
+    // 卡片底：柔和渐变 + 微投影（苹果风格弹层）
+    ctx.save();
+    ctx.shadowColor = 'rgba(0,0,0,0.35)';
+    ctx.shadowBlur = 12;
+    const bg = this._grad('club|' + Math.round(bx) + '|' + Math.round(by) + '|' + Math.round(cardH), () => {
+      const gg = ctx.createLinearGradient(bx, by, bx, by + cardH);
+      gg.addColorStop(0, 'rgba(94,53,177,0.95)');
+      gg.addColorStop(1, 'rgba(69,39,160,0.95)');
+      return gg;
+    });
+    ctx.fillStyle = bg;
+    this.roundRect(bx, by, cardW, cardH, 16); ctx.fill();
+    ctx.shadowBlur = 0;
+    ctx.strokeStyle = 'rgba(255,255,255,0.25)';
+    ctx.lineWidth = 1.5;
+    this.roundRect(bx + 1, by + 1, cardW - 2, cardH - 2, 16); ctx.stroke();
+    ctx.restore();
+
+    // 文案：单行引导语
+    ctx.fillStyle = '#fff';
+    ctx.font = '13px ' + APPLE_FONT;
+    ctx.textAlign = 'left';
+    ctx.textBaseline = 'middle';
+    const tx = bx + 16;
+    ctx.fillText('来游戏圈点个赞，帮我上推荐～', tx, by + 20);
+
+    // 进入社区按钮（蓝色，直达游戏圈）
+    const btnW = 82, btnH = 26;
+    const btnRect = { x: bx + cardW - btnW - 12, y: by + cardH - btnH - 10, w: btnW, h: btnH, action: 'club_enter' };
+    this.drawButton(btnRect.x, btnRect.y, btnRect.w, btnRect.h, '进入', '#2196f3');
+    this.clubGuideRects.push(btnRect);
+
+    // 右上角关闭 X
+    const close = { x: bx + cardW - 30, y: by + 8, w: 20, h: 20, action: 'club_guide_close' };
+    ctx.fillStyle = 'rgba(255,255,255,0.14)';
+    ctx.beginPath(); ctx.arc(close.x + close.w / 2, close.y + close.h / 2, close.w / 2, 0, Math.PI * 2); ctx.fill();
+    ctx.strokeStyle = 'rgba(255,255,255,0.7)'; ctx.lineWidth = 1.5;
+    // 图标资产 v3：游戏圈浮层关闭用 icon-close.png
+    if (!this._drawPngIcon('close', close.x + close.w / 2, close.y + close.h / 2, close.w - 6)) {
+      ctx.beginPath();
+      ctx.moveTo(close.x + 6, close.y + 6); ctx.lineTo(close.x + 14, close.y + 14);
+      ctx.moveTo(close.x + 14, close.y + 6); ctx.lineTo(close.x + 6, close.y + 14);
+      ctx.stroke();
+    }
+    this.clubGuideRects.push(close);
+  }
+
+  hitTest(x, y) {
+    // 游戏圈引导浮层：优先响应其按钮，其余区域仍走正常交互
+    if (this.game.clubGuideOpen && !this.game.drawCard && this.game.tutorialDone) {
+      for (const g of this.clubGuideRects) {
+        if (isPointInRect(x, y, g)) return { type: 'button', action: g.action };
+      }
+    }
+    // 抽卡动画态：只命中"收入背包"按钮
+    if (this.game.drawCard) {
+      for (const m of this.modalRects) {
+        if (isPointInRect(x, y, m)) return { type: 'button', action: m.action };
+      }
+      return null;
+    }
+    if (!this.game.tutorialDone) {
+      // 引导态：优先命中模态按钮（跳过），其余任意点击推进
+      for (const m of this.modalRects) if (isPointInRect(x, y, m)) return { type: 'button', action: m.action };
+      return { type: 'tutorial' };
+    }
+    if (this.game.signOpen) {
+      for (const m of this.modalRects) {
+        if (isPointInRect(x, y, m)) return { type: 'button', action: m.action };
+      }
+      return { type: 'sign_close' };
+    }
+    // 批次D·局前 buff 选择弹窗：只响应面板内按钮，其余区域不响应（防误触穿透到主菜单）
+    if (this.game.buffOpen) {
+      for (const m of this.modalRects) {
+        if (isPointInRect(x, y, m)) return { type: 'button', action: m.action };
+      }
+      return null;
+    }
+    // 批次E·连战三选一浮层：只响应面板内按钮，其余区域不响应（防误触穿透到结算页）
+    if (this.game.runBuffOpen) {
+      for (const m of this.modalRects) {
+        if (isPointInRect(x, y, m)) return { type: 'button', action: m.action };
+      }
+      return null;
+    }
+    // 出售二次确认弹窗：只响应确认/取消按钮，其余区域不响应（防止误触）
+    if (this.game.sellConfirm) {
+      for (const m of this.modalRects) {
+        if (isPointInRect(x, y, m)) return { type: 'button', action: m.action };
+      }
+      return null;
+    }
+    // 通用模态按钮检测：所有弹窗（竞技场/每日任务/抽卡/签到等）的关闭按钮、操作按钮
+    // modalRects 优先于普通 buttons，因为弹窗在最上层
+    for (const m of this.modalRects) {
+      if (isPointInRect(x, y, m)) return { type: 'button', action: m.action };
+    }
+    for (const tb of this.tabRects) if (isPointInRect(x, y, tb)) return { type: 'tab', view: tb.view };
+    for (const btn of this.buttons) if (isPointInRect(x, y, btn)) return { type: 'button', action: btn.action };
+    for (const f of this.filterRects) if (isPointInRect(x, y, f)) return { type: 'filter', tierIndex: f.tierIndex };
+    for (const p of this.platformRects) if (isPointInRect(x, y, p)) return { type: 'platform', index: p.index };
+    for (const r of this.gridRects) if (isPointInRect(x, y, r)) return { type: 'inventory', beyblade: r.beyblade };
+    return null;
+  }
+
+  render(dt) {
+    this._frameCount = (this._frameCount || 0) + 1;
+    // 首帧极简渲染：仅背景+标题，保证像素立即上屏（避免白屏、压首屏渲染耗时）
+    if (this._frameCount <= 2) {
+      try {
+        this.buttons = [];
+        this.modalRects = [];
+        this.clear();
+        this.drawBackground();
+        this.drawSplashTitle();
+      } catch (e) {
+        console.warn('[splash]', e);
+      }
+      return;
+    }
+    try {
+      // V2：布局仅在依赖状态变化时重算（canvas 尺寸 / energy / 回满·广告可用性），避免每帧全量 CPU 计算
+      this._maybeReflow();
+    } catch (e) {
+      console.warn('[reflow]', e);
+    }
+    // 命中区数组复用：length=0 清空替代每帧重建，降低 GC 频率（诊断高频 GC 是卡顿主因之一）
+    // 按钮对象池：将上一帧的按钮对象回收到对象池，避免每帧创建新对象
+    this.releaseButtons();
+    this.modalRects.length = 0;
+    this.clubGuideRects.length = 0;
+    this.tabRects.length = 0;
+    this.filterRects.length = 0;
+    this.platformRects.length = 0;
+    this.gridRects.length = 0;
+    this.clear();
+
+    // 震屏：随机偏移、幅度随时间衰减（传说出货等强力反馈时由 shake() 触发）
+    let shX = 0, shY = 0;
+    if (this._shakeT > 0) {
+      this._shakeT -= dt;
+      const m = this._shakeMag * Math.max(0, this._shakeT / this._shakeDur);
+      shX = (Math.random() * 2 - 1) * m;
+      shY = (Math.random() * 2 - 1) * m;
+    }
+    if (shX || shY) { this.ctx.save(); this.ctx.translate(shX, shY); }
+
+    if (this.game.mode === 'battle' && this.game.battle) {
+      this.drawSpintopBattle(dt);
+    } else {
+      this.drawBackground();
+      this.drawHeader();
+      this.drawTitleAndTabs();
+      if (this.game.view === 'codex') {
+        this.drawCodex();
+      } else {
+        this.drawPlatform();
+        this.drawActionBar();
+        this.drawFiltersAndDraw();
+        this.drawInventory();
+      }
+    }
+
+    this.drawDrag();
+    if (this.game.clubGuideOpen && !this.game.drawCard && this.game.tutorialDone) this.drawClubGuide();
+    if (this.game.drawCard) this.drawDrawCard();
+    if (this.game.sellConfirm) this.drawSellConfirm();
+    if (this.game.signOpen) this.drawSignin();
+    if (this.game.dailyOpen) this.drawDailyPanel();
+    if (this.game.arenaOpen) this.drawArenaPanel();
+    if (this.game.levelOpen) this.drawLevelPanel();
+    if (this.game.offlineOpen) this.drawReturnPanel();
+    if (this.game.battleChestOpen) this.drawBattleChestPanel();
+    if (this.game.boostOpen) this.drawBoostPanel();
+    if (this.game.buffOpen) this.drawBuffPanel();
+    if (this.game.runBuffOpen) this.drawRunBuffPanel();
+    if (!this.game.tutorialDone && !this.game.drawCard) this.drawTutorial();
+    this.drawFloatTexts(dt);
+    this.drawParticles(dt);
+    if (shX || shY) this.ctx.restore();
+  }
+}
+
+module.exports = { Renderer };

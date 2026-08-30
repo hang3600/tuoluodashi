@@ -1,0 +1,11 @@
+# ===== 微信小游戏 DevTools 本地产物（不共享、每台机器不同） =====
+preview/
+.tmpcheck/
+project.private.config.json
+
+# ===== 系统 / 编辑器 =====
+.DS_Store
+Thumbs.db
+
+# ===== 依赖兜底（本项目零 npm 依赖） =====
+node_modules/
