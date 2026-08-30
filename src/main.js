@@ -331,48 +331,32 @@ class Main {
             if (a === 'draw') {
               // 能量不足 → 金币应急抽卡（金币目前唯一的消耗出口）。
               // 金币是「用积累换速度」，能量是免费途径（6/秒自动回满），二者并行不冲突。
-              const useCoins = this.game.energy < 8;
-              if (useCoins && this.game.coins < COIN_DRAW_COST) {
-                this._toast('能量不足，稍等回能或看广告');
-                break;
-              }
-              const pityBefore = { epic: this.game.pityEpic || 0, legend: this.game.pityLegend || 0 };
-              const bb = this.game.draw(useCoins);
-              // 带上余额，避免玩家连点把金币抽空了自己没察觉
-              if (useCoins) this._toast('金币抽卡 -' + COIN_DRAW_COST + '（余 ' + this.game.coins + '）');
-              if (bb) {
-                if (this.game.lastDrawConverted) {
-                  // 背包已满：本抽折算为金币，不播「获得卡牌」动画，避免 UI 与结果不符
-                  this._toast('背包已满，+' + this.game.lastDrawConverted + ' 金币已入账');
-                } else {
-                  // 抽卡仪式感：卡牌翻开动画（bb 已入背包，仅展示）
-                  this.game.drawCard = { bb, t: 0 };
-                  this.renderer.addParticles(p.x, p.y, bb.tier.color, 16);
-                  // 保底出货：史诗/传说保底触发 → 强力出货反馈（环 + 大粒子 + 震屏）
-                  // draw() 内部先 +1 再判保底（pityLegend>=30 / pityEpic>=10），故 draw 前 >=29 / >=9 即本次必触发
-                  const isPityLegend = pityBefore.legend >= 29;
-                  const isPityEpic = pityBefore.epic >= 9;
-                  const fxX = this.canvas.width / 2, fxY = this.canvas.height * 0.42;
-                  if (isPityLegend) {
-                    this.renderer.addRing(fxX, fxY, '#ffd54f');
-                    this.renderer.addParticles(fxX, fxY, '#ffd54f', 40);
-                    this.renderer.addParticles(fxX, fxY, '#ffffff', 14);
-                    this.renderer.shake(10, 0.5);
-                    this.renderer.addFloatText(fxX, fxY - 80, '保底必出传说！', '#ffd54f');
-                  } else if (isPityEpic) {
-                    this.renderer.addRing(fxX, fxY, bb.tier.color);
-                    this.renderer.addParticles(fxX, fxY, bb.tier.color, 28);
-                    this.renderer.shake(6, 0.35);
-                  }
-                  this.audio.play('draw');
-                  // 限时活动（play-design v1）：节日限定额外掉落提示
-                  if (this.game._festivalDrop) {
-                    const fd = this.game._festivalDrop;
-                    this.game._festivalDrop = null;
-                    this._toast('节日限定掉落！' + fd.tier.name + '·Lv' + fd.level);
-                  }
-                }
-              }
+              this._doDraw(p, { useCoins: this.game.energy < 8, free: false });
+            } else if (a === 'draw_ad') {
+              // 看广告免费抽一次：复用 draw(free) + 现有抽卡动画/保底特效
+              if (this._adBusy) return;
+              if (!this.game.canWatchAdDraw()) { this._toast('今日广告免费抽已用完'); return; }
+              this._adBusy = true;
+              Rewarded.show({
+                onReward: () => {
+                  this._adBusy = false;
+                  this.game.drawAdBroken = false;
+                  this.game.watchAdDraw();
+                  this._doDraw(p, { useCoins: false, free: true });
+                },
+                onFail: () => {
+                  this._adBusy = false;
+                  // 广告不可用降级为直接免费抽（与竞技宝箱/复活一致），不计每日次数
+                  this.game.drawAdBroken = true;
+                  this._doDraw(p, { useCoins: false, free: true });
+                  this._toast('广告暂不可用 · 已为你免费抽');
+                },
+                onClose: () => { this._adBusy = false; }
+              });
+            } else if (a === 'draw_ad_free') {
+              // 广告不可用降级通道：直接免费抽一次（不计每日次数）
+              if (this._adBusy) return;
+              this._doDraw(p, { useCoins: false, free: true });
             } else if (a === 'draw_close') {
               this.game.drawCard = null;
             } else if (a === 'merge') {
@@ -828,6 +812,56 @@ class Main {
     }
     this.audio.play('click');
     this._toast('分享成功');
+  }
+
+  // 抽卡统一入口：执行 game.draw 并播放仪式动画/保底特效。
+  // opts.useCoins: 用金币支付（能量不足应急）；opts.free: 看广告免费抽（不扣能量/金币）。
+  // 复用现有 draw 动画、保底反馈、节庆掉落、经验、每日任务逻辑（全在 game.draw 内部）。
+  _doDraw(p, opts) {
+    const useCoins = !!opts.useCoins;
+    const free = !!opts.free;
+    if (useCoins && this.game.coins < COIN_DRAW_COST) {
+      this._toast('能量不足，稍等回能或看广告');
+      return null;
+    }
+    const pityBefore = { epic: this.game.pityEpic || 0, legend: this.game.pityLegend || 0 };
+    const bb = this.game.draw(useCoins, free);
+    if (free) this._toast('看广告免费抽卡 +1');
+    else if (useCoins) this._toast('金币抽卡 -' + COIN_DRAW_COST + '（余 ' + this.game.coins + '）');
+    if (bb) {
+      if (this.game.lastDrawConverted) {
+        // 背包已满：本抽折算为金币，不播「获得卡牌」动画，避免 UI 与结果不符
+        this._toast('背包已满，+' + this.game.lastDrawConverted + ' 金币已入账');
+      } else {
+        // 抽卡仪式感：卡牌翻开动画（bb 已入背包，仅展示）
+        this.game.drawCard = { bb, t: 0 };
+        this.renderer.addParticles(p.x, p.y, bb.tier.color, 16);
+        // 保底出货：史诗/传说保底触发 → 强力出货反馈（环 + 大粒子 + 震屏）
+        // draw() 内部先 +1 再判保底（pityLegend>=30 / pityEpic>=10），故 draw 前 >=29 / >=9 即本次必触发
+        const isPityLegend = pityBefore.legend >= 29;
+        const isPityEpic = pityBefore.epic >= 9;
+        const fxX = this.canvas.width / 2, fxY = this.canvas.height * 0.42;
+        if (isPityLegend) {
+          this.renderer.addRing(fxX, fxY, '#ffd54f');
+          this.renderer.addParticles(fxX, fxY, '#ffd54f', 40);
+          this.renderer.addParticles(fxX, fxY, '#ffffff', 14);
+          this.renderer.shake(10, 0.5);
+          this.renderer.addFloatText(fxX, fxY - 80, '保底必出传说！', '#ffd54f');
+        } else if (isPityEpic) {
+          this.renderer.addRing(fxX, fxY, bb.tier.color);
+          this.renderer.addParticles(fxX, fxY, bb.tier.color, 28);
+          this.renderer.shake(6, 0.35);
+        }
+        this.audio.play('draw');
+        // 限时活动（play-design v1）：节日限定额外掉落提示
+        if (this.game._festivalDrop) {
+          const fd = this.game._festivalDrop;
+          this.game._festivalDrop = null;
+          this._toast('节日限定掉落！' + fd.tier.name + '·Lv' + fd.level);
+        }
+      }
+    }
+    return bb;
   }
 
   _toast(msg) {

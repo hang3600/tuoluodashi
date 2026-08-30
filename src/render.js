@@ -1247,7 +1247,20 @@ class Renderer {
     this.drawButton(battleRect.x, battleRect.y, battleRect.w, battleRect.h, '对战', '#e53935');
     this.drawButton(mergeRect.x,  mergeRect.y,  mergeRect.w,  mergeRect.h,  '合成', '#ff8f00');
     this.drawButton(drawRect.x,   drawRect.y,   drawRect.w,   drawRect.h,   '抽卡', '#7e57c2');
-    this.buttons.push(battleRect, mergeRect, drawRect);
+
+    // 看广告免费抽（抽卡广告位）：挂在「抽卡」按钮正上方，复用 draw 动画/保底。
+    // 与竞技宝箱一致：广告可用→draw_ad（每日限3）；广告不可用→降级 draw_ad_free（直接免费抽）。
+    const drawAdBroken = !!this.game.drawAdBroken;
+    const drawAdAvail = this.game.canWatchAdDraw();
+    const drawAdRemain = Math.max(0, 3 - (this.game.drawAdCount || 0));
+    const adDrawRect = { x: drawRect.x, y: drawRect.y - 30, w: drawRect.w, h: 24, action: drawAdBroken ? 'draw_ad_free' : 'draw_ad' };
+    let adDrawLabel, adDrawColor;
+    if (drawAdBroken) { adDrawLabel = '免费抽'; adDrawColor = '#43a047'; }
+    else if (drawAdAvail) { adDrawLabel = '📺 免费抽(' + drawAdRemain + '/3)'; adDrawColor = '#ffb300'; }
+    else { adDrawLabel = '广告抽已用完'; adDrawColor = 'rgba(255,255,255,0.25)'; }
+    this.drawButton(adDrawRect.x, adDrawRect.y, adDrawRect.w, adDrawRect.h, adDrawLabel, adDrawColor);
+    this.buttons.push(drawRect, adDrawRect);
+    this.buttons.push(battleRect, mergeRect);
 
     // 游戏化装饰：外发光边框（每个按钮不同颜色发光）
     const gameBtns = [
