@@ -631,7 +631,12 @@ class Main {
               this._adBusy = true;
               Rewarded.show({
                 onReward: () => { if (this.lastBattleBb) { this._startBattle(this.lastBattleBb); this.audio.play('clash'); } },
-                onFail: () => { this._adBusy = false; this._toast('广告暂不可用'); },
+                onFail: () => {
+                  this._adBusy = false;
+                  // 兜底：广告不可用时不让玩家直接死，免费复活一次（广告真失败时才有此分支；看完的正常路径已被 ads.js settled 守卫拦截，不会走到这里）
+                  if (this.lastBattleBb) { this._startBattle(this.lastBattleBb); this.audio.play('clash'); this._toast('广告暂不可用 · 已为你免费复活'); }
+                  else { this._toast('广告暂不可用'); }
+                },
                 onClose: () => { this._adBusy = false; }
               });
             }

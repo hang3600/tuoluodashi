@@ -11,8 +11,9 @@
 
 const STATE = {
   ad: null,
-  adUnitId: 'adunit-1183de0d72298c4d',
+  adUnitId: '',  // 单一来源见 src/config.js 的 CONFIG.adUnitId；此处空串仅作未初始化占位，isPlaceholderId() 会拦截误用，真实值由 main.js 的 Rewarded.init(CONFIG.adUnitId) 注入
   pending: null,
+  settled: false,  // 单次展示是否已结算（onClose 已处理则 handleFailure 不再发 onFail，防双触发）
   // 广告加载状态统计
   stats: {
     totalShow: 0,
@@ -84,9 +85,12 @@ function ensureAd() {
       }
     });
     ad.onClose((res) => {
-      const ended = !!(res && res.isEnded);
+      // B：部分基础库 onClose 无参或 isEnded 缺失，未明确中断即算看完，避免"看完却没发奖"
+      const ended = !res || res.isEnded !== false;
       const cb = STATE.pending;
       STATE.pending = null;
+      // C：标记已结算，避免 show promise 的 reject 链路在 onClose 之后又触发 onFail（双触发竞态）
+      STATE.settled = true;
       if (cb) {
         if (ended) {
           _markAdSuccess();
@@ -140,6 +144,9 @@ const Rewarded = {
       return;
     }
 
+    // C：新一次展示开始前重置结算标志，避免被上一次展示的 settled 状态误伤
+    STATE.settled = false;
+
     const ad = ensureAd();
     if (ad) {
       STATE.pending = opts;
@@ -155,6 +162,8 @@ const Rewarded = {
       };
 
       const handleFailure = (error) => {
+        // C：若本次展示已被 onClose 结算，则放弃失败链路，杜绝双触发（复活后又弹"不可用"）
+        if (STATE.settled) { cleanupTimeout(); return; }
         cleanupTimeout();
         console.warn('[ad] show failed', error);
 
@@ -195,6 +204,7 @@ const Rewarded = {
       if (p && p.catch) {
         p.catch(() => {
           // show失败，尝试load后再show
+          if (STATE.settled) return;  // C：广告已看完结算，不再二次展示/触发失败
           ad.load()
             .then(() => ad.show())
             .catch((e) => handleFailure(e));
