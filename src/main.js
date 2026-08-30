@@ -10,7 +10,7 @@ const { GameState, COIN_DRAW_COST } = require('./game');
 const { Renderer } = require('./render');
 const { InputHandler } = require('./input');
 const { Sfx } = require('./audio');
-const { Rewarded } = require('./ads');
+const { Rewarded, Interstitial } = require('./ads');
 const { CONFIG } = require('./config');
 const { reportBoot } = require('./analytics'); // 零成本埋点：冷启动事件（P1 数据盲区）
 // error-handler 用防御式加载：若开发者工具未将其扫进模块图（常见于外部工具新增文件后未重编译），
@@ -190,11 +190,13 @@ class Main {
     this._renderedThisFrame = false; // 本帧是否实际渲染（FPS 监控采样标记）
     this.lastBattleBb = null;
     this._adBusy = false;
+    this._drawAdPending = false; // 抽卡隐藏插屏待弹标志（抽卡成功后置位，收卡时弹出）
     this._fatalCount = 0;
     this._firstFrameRendered = false;
     this._clubGuideChecked = false; // 首帧后只检查一次游戏圈引导
 
     Rewarded.init(CONFIG.adUnitId);
+    Interstitial.init(CONFIG.interstitialAdUnitId); // 隐藏式抽卡插屏（留空则静默跳过）
 
     this._bindInput();
     this._initShare();
@@ -202,6 +204,8 @@ class Main {
     if (typeof wx !== 'undefined' && wx.onShow) {
       wx.onShow((res) => {
         try { this.game._checkShareEntry(res); } catch (e) { console.warn('[onShow]', e); }
+        // iOS 回前台：AudioContext 会被系统挂起，尝试恢复（被拒也无妨，下次触摸 input.js 会 unlock）
+        try { if (this.audio) this.audio.resume(); } catch (e) {}
       });
     }
 
@@ -318,7 +322,7 @@ class Main {
         // 抽卡动画态：仅允许"收入背包"关闭，屏蔽一切其它点击穿透
         if (this.game.drawCard) {
           const h2 = this.renderer.hitTest(p.x, p.y);
-          if (h2 && h2.type === 'button' && h2.action === 'draw_close') this.game.drawCard = null;
+          if (h2 && h2.type === 'button' && h2.action === 'draw_close') this._dismissDrawCard();
           return;
         }
         const hit = this.renderer.hitTest(p.x, p.y);
@@ -331,34 +335,10 @@ class Main {
             if (a === 'draw') {
               // 能量不足 → 金币应急抽卡（金币目前唯一的消耗出口）。
               // 金币是「用积累换速度」，能量是免费途径（6/秒自动回满），二者并行不冲突。
+              // 隐藏式抽卡插屏：抽卡成功后由 _doDraw 计数 + 待弹，收卡时自动弹出（见 _dismissDrawCard）。
               this._doDraw(p, { useCoins: this.game.energy < 8, free: false });
-            } else if (a === 'draw_ad') {
-              // 看广告免费抽一次：复用 draw(free) + 现有抽卡动画/保底特效
-              if (this._adBusy) return;
-              if (!this.game.canWatchAdDraw()) { this._toast('今日广告免费抽已用完'); return; }
-              this._adBusy = true;
-              Rewarded.show({
-                onReward: () => {
-                  this._adBusy = false;
-                  this.game.drawAdBroken = false;
-                  this.game.watchAdDraw();
-                  this._doDraw(p, { useCoins: false, free: true });
-                },
-                onFail: () => {
-                  this._adBusy = false;
-                  // 广告不可用降级为直接免费抽（与竞技宝箱/复活一致），不计每日次数
-                  this.game.drawAdBroken = true;
-                  this._doDraw(p, { useCoins: false, free: true });
-                  this._toast('广告暂不可用 · 已为你免费抽');
-                },
-                onClose: () => { this._adBusy = false; }
-              });
-            } else if (a === 'draw_ad_free') {
-              // 广告不可用降级通道：直接免费抽一次（不计每日次数）
-              if (this._adBusy) return;
-              this._doDraw(p, { useCoins: false, free: true });
             } else if (a === 'draw_close') {
-              this.game.drawCard = null;
+              this._dismissDrawCard();
             } else if (a === 'merge') {
               const merged = this.game.tryMerge();
               if (merged) {
@@ -826,6 +806,11 @@ class Main {
     }
     const pityBefore = { epic: this.game.pityEpic || 0, legend: this.game.pityLegend || 0 };
     const bb = this.game.draw(useCoins, free);
+    if (bb) {
+      // 隐藏式抽卡插屏：累计抽数 + 安排待弹（第3/6/9抽必弹 + 随机补）
+      this.game.drawsSinceAd++;
+      this._maybeScheduleDrawAd();
+    }
     if (free) this._toast('看广告免费抽卡 +1');
     else if (useCoins) this._toast('金币抽卡 -' + COIN_DRAW_COST + '（余 ' + this.game.coins + '）');
     if (bb) {
@@ -872,6 +857,30 @@ class Main {
         console.log('[toast]', msg);
       }
     } catch (e) {}
+  }
+
+  /**
+   * 抽卡隐藏插屏：抽卡成功后调用，决定是否"待弹"。
+   * 规则层（每3抽必弹+随机补、每日上限）在 game.shouldScheduleDrawInterstitial()；
+   * 这里补平台最小间隔守卫(Interstitial.canShow)，通过则置待弹标志。
+   */
+  _maybeScheduleDrawAd() {
+    if (this._drawAdPending) return;                   // 已有待弹，不叠加
+    if (!Interstitial.canShow()) return;              // 平台最小间隔/无能力/未配ID
+    if (this.game.shouldScheduleDrawInterstitial()) this._drawAdPending = true;
+  }
+
+  /** 收卡时调用：关闭抽卡动画，并在有待弹插屏时自动弹出（隐藏式、无选择）。 */
+  _dismissDrawCard() {
+    this.game.drawCard = null;
+    if (!this._drawAdPending) return;
+    this._drawAdPending = false;
+    Interstitial.show({
+      // 实际展示成功 → 计每日上限
+      onShown: () => { this.game.markDrawInterstitialShown(); },
+      // 未展示（被平台频控吞掉/加载失败/能力缺失）→ 本次不计数，静默跳过
+      onSkip: () => {}
+    });
   }
 
   // 对战模块懒加载：首次进入对战才下载 battle 子包并实例化 SpintopBattle。

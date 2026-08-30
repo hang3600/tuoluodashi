@@ -263,4 +263,99 @@ const Rewarded = {
   }
 };
 
-module.exports = { Rewarded };
+// ============================================================
+// 插屏广告封装（隐藏式自动弹）：用于「连续抽卡每 N 抽自动插播」
+// - 与 Rewarded 不同：插屏无奖励、无用户选择，平台强制在场景断点自动弹出
+// - 微信对插屏有频控：两次最小间隔 INTERSTITIAL_MIN_INTERVAL、单日上限由业务层(game.js)控制
+// - 浏览器 / 无 createInterstitialAd / 占位ID / 不可用 → 静默跳过（不报错、不弹）
+// ============================================================
+const INTERSTITIAL_MIN_INTERVAL = 60000; // 两次插屏最小间隔(ms)，与微信平台频控对齐，避免被吞/被限
+
+const ISTATE = {
+  ad: null,
+  adUnitId: '',          // 单一来源见 src/config.js 的 CONFIG.interstitialAdUnitId；空串仅作未初始化占位
+  lastShown: 0,          // 上次展示时间戳（用于最小间隔守卫）
+  adAvailable: true,     // 连续失败过多时临时禁用
+  pending: null
+};
+
+function _iIsPlaceholder() {
+  return !ISTATE.adUnitId || /^adunit-0+$/.test(ISTATE.adUnitId);
+}
+
+function _iEnsure() {
+  if (ISTATE.ad) return ISTATE.ad;
+  if (typeof wx === 'undefined' || !wx.createInterstitialAd) return null;
+  try {
+    const ad = wx.createInterstitialAd({ adUnitId: ISTATE.adUnitId });
+    ad.onError((err) => { console.warn('[i-ad] error', err); });
+    ad.onClose(() => {
+      const cb = ISTATE.pending;
+      ISTATE.pending = null;
+      if (cb && cb.onClose) cb.onClose();
+    });
+    ISTATE.ad = ad;
+    return ISTATE.ad;
+  } catch (e) { return null; }
+}
+
+const Interstitial = {
+  init(adUnitId) {
+    if (adUnitId) ISTATE.adUnitId = adUnitId;
+    // 广告创建移出启动同步链路：延迟预加载，避免阻塞首帧
+    try {
+      if (typeof setTimeout === 'function') setTimeout(function () { _iEnsure(); }, 3500);
+    } catch (e) {}
+    // 占位ID提醒（仅 console，不打扰玩家；真机未配置时静默跳过）
+    try {
+      if (typeof wx !== 'undefined' && typeof wx.createInterstitialAd === 'function' && _iIsPlaceholder()) {
+        console.warn('[i-ad] 插屏广告位ID未配置（占位），隐藏广告将静默跳过');
+      }
+    } catch (e) {}
+  },
+
+  /** 当前是否允许展示（最小间隔 + 能力 + 占位ID + 可用性）。业务层还需自行判每日上限。 */
+  canShow() {
+    if (!ISTATE.adAvailable) return false;
+    if (typeof wx === 'undefined' || !wx.createInterstitialAd) return false;
+    if (_iIsPlaceholder()) return false;
+    if (Date.now() - ISTATE.lastShown < INTERSTITIAL_MIN_INTERVAL) return false;
+    return true;
+  },
+
+  /**
+   * 展示插屏广告。
+   * @param {Object} opts
+   * @param {Function} opts.onShown 实际展示成功回调（业务层在此计每日上限）
+   * @param {Function} opts.onSkip  未展示回调（占位/能力缺失/被频控吞掉/加载失败）——不计数
+   */
+  show(opts = {}) {
+    const ad = _iEnsure();
+    if (!ad) { if (opts.onSkip) opts.onSkip(); return; }
+    // 二次频控守卫（canShow 已判一次，这里再判以防御重入）
+    if (Date.now() - ISTATE.lastShown < INTERSTITIAL_MIN_INTERVAL) { if (opts.onSkip) opts.onSkip(); return; }
+    ISTATE.lastShown = Date.now();
+    ISTATE.pending = opts;
+    const onShown = () => { if (opts.onShown) opts.onShown(); };
+    const onFail = () => { ISTATE.pending = null; if (opts.onSkip) opts.onSkip(); };
+    const retry = () => {
+      try {
+        const p2 = ad.show();
+        if (p2 && p2.then) p2.then(onShown).catch(onFail);
+        else onShown();
+      } catch (e) { onFail(); }
+    };
+    try {
+      const p = ad.show();
+      if (p && p.then) {
+        p.then(onShown).catch(() => { try { ad.load().then(retry).catch(onFail); } catch (e) { onFail(); } });
+      } else if (p && p.catch) {
+        p.catch(() => { try { ad.load().then(retry).catch(onFail); } catch (e) { onFail(); } });
+      } else {
+        onShown();
+      }
+    } catch (e) { onFail(); }
+  }
+};
+
+module.exports = { Rewarded, Interstitial };

@@ -3,6 +3,7 @@
  */
 
 const { isPointInRect } = require('./utils');
+const { Sfx } = require('./audio');
 
 class InputHandler {
   constructor(canvas) {
@@ -59,6 +60,12 @@ class InputHandler {
   }
 
   _handleStart(e) {
+    // iOS 音频解锁：必须在原生触摸手势内创建并 resume AudioContext（系统限制）。
+    // 首触即解锁，且仅执行一次；玩家任何点击/拖拽都会触发，确保首次出声稳定。
+    if (!this._audioUnlocked) {
+      this._audioUnlocked = true;
+      try { if (typeof Sfx !== 'undefined') Sfx.unlock(); } catch (e) {}
+    }
     for (const t of e.changedTouches) {
       const p = this._normalize(t);
       const item = { id: p.id, x: p.x, y: p.y, startX: p.x, startY: p.y, moved: false, longPressed: false };

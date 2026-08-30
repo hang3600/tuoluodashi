@@ -10,8 +10,14 @@ const CONFIG = {
   //     （见 analytics.js），不再依赖此字段做切片。
   version: '1.0.0',
 
-  // 激励视频广告位 ID
+  // 激励视频广告位 ID（单一真源；已确认为真实流量主广告位 adunit-1183de0d72298c4d，上线前勿改）
   adUnitId: 'adunit-1183de0d72298c4d',
+
+  // 插屏广告位 ID（隐藏式自动弹广告用）—— ⚠️ 与上面激励视频是「两套独立广告位」！
+  // 必须去 MP 后台「流量主 → 广告位 → 插屏广告」单独新建一个，把分配的新 ID 填这里；
+  // 不能直接复用上面的激励视频 ID（类型不同，复用会被微信拒绝/不展示）。
+  // 单一点位已确认：adunit-6543c4bf1cb6c43f（插屏广告位 ID，2026-08-30 用户回填）。
+  interstitialAdUnitId: 'adunit-6543c4bf1cb6c43f',
 
   // 游戏圈 openlink：必须是短 token（形如 xxxxxxx-xxxxxx），不是浏览器 URL。
   // 唯一正确取法：登录 mp.weixin.qq.com → 游戏能力地图 → 游戏圈 → 基础设置 / 帖子·话题列表，

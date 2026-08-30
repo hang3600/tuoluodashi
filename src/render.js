@@ -122,7 +122,7 @@ class Renderer {
       }
     } catch (e) {}
     // 高频渐变缓存（能量条 / 平台底板等每帧重建的渐变），降低每帧分配与 GC
-    this._gradCache = {};
+    this._gradCache = new Map();
 
     this.stars = [];
     let seed = 1234.5678;
@@ -176,7 +176,7 @@ class Renderer {
    */
   _reflow() {
     // 布局几何变化 → 缓存渐变（绑定旧坐标）与背景离屏（依赖旧尺寸）全部失效
-    this._gradCache = {};
+    this._gradCache = new Map();
     const W = this.width, H = this.height;
     const ST = this.safeTop, SB = this.safeBottom;
 
@@ -500,12 +500,17 @@ class Renderer {
     this._layoutSig = sig;
   }
 
-  /** 高频渐变缓存：按几何键缓存渐变对象，避免每帧 createLinearGradient/RadialGradient 分配 */
+  /** 高频渐变缓存：按几何键缓存渐变对象，避免每帧 createLinearGradient/RadialGradient 分配。
+   *  关键：缓存上限 64 条（LRU 淘汰最旧）。动画期间能量条/按钮的渐变 key 含每帧变化坐标，
+   *  若无限堆积 CanvasGradient 会触发内存暴涨 + GC 卡顿（云测 24129RT7CC 945MB/64% 卡顿根因）。 */
   _grad(key, create) {
-    let g = this._gradCache[key];
-    if (!g) {
-      g = create();
-      this._gradCache[key] = g;
+    let g = this._gradCache.get(key);
+    if (g) return g;
+    g = create();
+    this._gradCache.set(key, g);
+    if (this._gradCache.size > 64) {
+      const oldest = this._gradCache.keys().next().value;
+      this._gradCache.delete(oldest);
     }
     return g;
   }
@@ -801,18 +806,42 @@ class Renderer {
     this.drawIconButton(muteRect, this.audio && this.audio.muted ? 'mute' : 'unmute');
     this.buttons.push(muteRect);
 
-    // ----- 胶囊左侧手柄入口 · 更多小游戏（同一行，紧贴胶囊）-----
-    // P2-8：仅在 config.js 配好 moreGamesOpenlink 时才渲染，未配置则不出现，
-    // 避免出现"点了只弹敬请期待"的死按钮（与 club 按钮判定一致）。
+    // ----- 左上角手柄入口（同一行 · 屏幕最左上起步，向右排）-----
+    // 游戏圈（club）最左、更多小游戏（moregames）在其右侧，两者各自仅在对应 openlink 配置时才渲染，
+    // 避免死按钮。位置从「贴胶囊右上角」改为「左上角」，与右上角系统胶囊分离（用户要求）。
     const mb = this.menuBtn;
     if (mb && mb.width > 0) {
       const mh = Math.min(36, Math.max(24, mb.height));
       const mr = Math.min(11, mh / 2 - 1);
       const mtop = mb.top + Math.round((mb.height - mh) / 2);
-      // anchorLeft 为下一个入口的起始 x（默认紧贴胶囊左侧一个身位）
-      let anchorLeft = mb.left - 10 - mh;
-      if (CONFIG.moreGamesOpenlink) {
-        const mRect = { x: anchorLeft, y: mtop, w: mh, h: mh, action: 'moregames' };
+      // 左上角起步：x 从屏幕左 padding 起，依次向右排；不再贴右上角胶囊
+      let leftX = 16;
+      const GAP = 8;
+      const inBounds = (rx) => rx >= 0 && (rx + mh) <= this.width;
+
+      // --- 游戏圈/社区（流量主条件二 · 有效活跃）：最左上 ---
+      if (CONFIG.gameClubOpenlink && inBounds(leftX)) {
+        const cRect = { x: leftX, y: mtop, w: mh, h: mh, action: 'club' };
+        ctx.save();
+        ctx.shadowColor = 'rgba(255,213,79,0.35)';
+        ctx.shadowBlur = 6 * this.shadowScale;
+        ctx.fillStyle = 'rgba(20,10,44,0.66)';
+        ctx.strokeStyle = 'rgba(255,213,79,0.55)';
+        ctx.lineWidth = 1;
+        this.roundRect(cRect.x, cRect.y, cRect.w, cRect.h, mr); ctx.fill(); ctx.stroke();
+        ctx.restore();
+        const cpad = Math.max(4, cRect.h * 0.16);
+        const cis = cRect.h - cpad * 2;
+        // 无 icon-club.png，直接走矢量气泡（utils.js drawVectorIcon 'club'）
+        drawVectorIcon(ctx, 'club', cRect.x + cRect.w / 2, cRect.y + cRect.h / 2, cis, '#ffffff');
+        this.buttons.push(cRect);
+        leftX = cRect.x + mh + GAP;   // 下一个入口向右挪
+      }
+
+      // --- 更多小游戏（仅配置 moreGamesOpenlink 时，排在游戏圈右侧）---
+      // P2-8：未配置则不出现，避免死按钮（与 club 判定一致）。
+      if (CONFIG.moreGamesOpenlink && inBounds(leftX)) {
+        const mRect = { x: leftX, y: mtop, w: mh, h: mh, action: 'moregames' };
         // P2-3：与 drawIconButton 同款按下态（缩放 + 高亮）
         const sameRect = (a, b) => a && b && Math.abs(a.x - b.x) < 0.01 && Math.abs(a.y - b.y) < 0.01 && Math.abs(a.w - b.w) < 0.01 && Math.abs(a.h - b.h) < 0.01;
         const mPressed = sameRect(this.pressedBtn && this.pressedBtn.rect, mRect);
@@ -834,30 +863,7 @@ class Renderer {
           drawVectorIcon(ctx, 'more', mRect.x + mRect.w / 2, mRect.y + mRect.h / 2, mis, '#ffffff');
         }
         this.buttons.push(mRect);
-        anchorLeft = mRect.x - 8 - mh;   // club 紧贴 moregames 左侧
-      }
-
-      // ----- 胶囊左侧手柄入口 · 游戏圈/社区（流量主条件二 · 有效活跃）-----
-      // 仅在 config.js 配好 gameClubOpenlink 时才渲染：未配置就不出现，
-      // 避免出现"点了没反应"的死按钮（也是之前玩家能看到"请先在后台配置"的根因）。
-      // 位置：moregames 左侧一个身位（未配置 moregames 时则紧贴胶囊）。
-      if (CONFIG.gameClubOpenlink) {
-        const cRect = { x: anchorLeft, y: mtop, w: mh, h: mh, action: 'club' };
-        if (cRect.x > 16) {   // 越界兜底：极端窄屏直接不画，绝不顶出屏幕
-          ctx.save();
-          ctx.shadowColor = 'rgba(255,213,79,0.35)';
-          ctx.shadowBlur = 6 * this.shadowScale;
-          ctx.fillStyle = 'rgba(20,10,44,0.66)';
-          ctx.strokeStyle = 'rgba(255,213,79,0.55)';
-          ctx.lineWidth = 1;
-          this.roundRect(cRect.x, cRect.y, cRect.w, cRect.h, mr); ctx.fill(); ctx.stroke();
-          ctx.restore();
-          const cpad = Math.max(4, cRect.h * 0.16);
-          const cis = cRect.h - cpad * 2;
-          // 无 icon-club.png，直接走矢量气泡（utils.js drawVectorIcon 'club'）
-          drawVectorIcon(ctx, 'club', cRect.x + cRect.w / 2, cRect.y + cRect.h / 2, cis, '#ffffff');
-          this.buttons.push(cRect);
-        }
+        leftX = mRect.x + mh + GAP;
       }
     }
 
@@ -1248,19 +1254,9 @@ class Renderer {
     this.drawButton(mergeRect.x,  mergeRect.y,  mergeRect.w,  mergeRect.h,  '合成', '#ff8f00');
     this.drawButton(drawRect.x,   drawRect.y,   drawRect.w,   drawRect.h,   '抽卡', '#7e57c2');
 
-    // 看广告免费抽（抽卡广告位）：挂在「抽卡」按钮正上方，复用 draw 动画/保底。
-    // 与竞技宝箱一致：广告可用→draw_ad（每日限3）；广告不可用→降级 draw_ad_free（直接免费抽）。
-    const drawAdBroken = !!this.game.drawAdBroken;
-    const drawAdAvail = this.game.canWatchAdDraw();
-    const drawAdRemain = Math.max(0, 3 - (this.game.drawAdCount || 0));
-    const adDrawRect = { x: drawRect.x, y: drawRect.y - 30, w: drawRect.w, h: 24, action: drawAdBroken ? 'draw_ad_free' : 'draw_ad' };
-    let adDrawLabel, adDrawColor;
-    if (drawAdBroken) { adDrawLabel = '免费抽'; adDrawColor = '#43a047'; }
-    else if (drawAdAvail) { adDrawLabel = '📺 免费抽(' + drawAdRemain + '/3)'; adDrawColor = '#ffb300'; }
-    else { adDrawLabel = '广告抽已用完'; adDrawColor = 'rgba(255,255,255,0.25)'; }
-    this.drawButton(adDrawRect.x, adDrawRect.y, adDrawRect.w, adDrawRect.h, adDrawLabel, adDrawColor);
-    this.buttons.push(drawRect, adDrawRect);
-    this.buttons.push(battleRect, mergeRect);
+    // 抽卡隐藏插屏广告（第3/6/9抽自动弹，无需按钮）：原「看广告免费抽」入口已移除，
+    // 改为抽卡收卡时自动插播，玩家无选择、无入口。
+    this.buttons.push(drawRect, battleRect, mergeRect);
 
     // 游戏化装饰：外发光边框（每个按钮不同颜色发光）
     const gameBtns = [

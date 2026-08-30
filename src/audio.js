@@ -24,11 +24,19 @@ const Sfx = {
     }
     this._loadMuted();
     this.ready = true;
+    this.resume();   // iOS：创建后立即尝试 resume（首次必须在用户手势内，由 input.js 的 unlock 触发）
+  },
+
+  /** 在用户手势内调用：创建并恢复 AudioContext（iOS 仅允许在手势内解锁音频） */
+  unlock() {
+    this.init();
+    this.resume();
   },
 
   resume() {
     if (this.ctx && this.ctx.state === 'suspended') {
-      this.ctx.resume().catch(() => {});
+      const r = this.ctx.resume();
+      if (r && r.catch) r.catch(() => {});
     }
   },
 
@@ -139,7 +147,10 @@ const Sfx = {
   _tone({ freq, slideTo, type = 'sine', dur = 0.15, gain = 0.12, noise = false }) {
     const ctx = this.ctx;
     if (!ctx) return;
-    const now = ctx.currentTime;
+    // iOS 关键：context 处于 suspended 时 currentTime 冻结为 0，若把音调度在 now=0，
+    // resume 后该时刻已被"跨过"→ 首声被丢弃（首声静音 bug）。未 running 时向前错开 60ms 确保发声。
+    const lead = ctx.state === 'running' ? 0 : 0.06;
+    const now = ctx.currentTime + lead;
     // 鞭响：噪声爆音层（短促、高频、快速衰减——模拟鞭子"啪"）
     if (noise) {
       const buf = this._noiseBuffer(ctx);

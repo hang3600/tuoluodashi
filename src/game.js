@@ -31,6 +31,13 @@ const INVENTORY_HARD_CAP = 400;
  */
 const COIN_DRAW_COST = 300;
 
+/**
+ * 抽卡隐藏插屏：单日展示上限。
+ * 配合微信平台对插屏的频控（两次最小间隔约 60s、单用户单日也有上限），
+ * 这里再设一道业务层上限做节流 + 防过度广告伤留存。达到后当日不再弹。
+ */
+const DRAW_INTERSTITIAL_DAILY_CAP = 12;
+
 class GameState {
   constructor() {
     this.coins = 0;
@@ -107,10 +114,11 @@ class GameState {
     this.adEnergyDate = '';
     this.adEnergyCount = 0;
 
-    // 抽卡广告位（看广告免费抽一次，每日上限 3）：与 adEnergy 同模式的每日计数 + 降级标志
-    this.drawAdDate = '';
-    this.drawAdCount = 0;
-    this.drawAdBroken = false; // 广告不可用降级标志（运行时，广告失败触发，成功/次日清除）
+    // 抽卡隐藏插屏广告（第3/6/9抽必弹 + 随机补；原「看广告免费抽」按钮已移除，合并为隐藏式）
+    this.drawsSinceAd = 0;        // 累计抽卡次数（用于"每3抽"判定；跨会话持久化防靠重启刷次数）
+    this.interAdDate = '';        // 插屏广告每日计数日期 key
+    this.interAdCount = 0;        // 当日已弹插屏次数（每日上限见 DRAW_INTERSTITIAL_DAILY_CAP）
+    this.interAdBroken = false;   // 插屏不可用降级标志（运行时，连续不可用触发，成功展示/次日清除）
 
     this.signDate = '';
     this.signDay = 0;
@@ -761,18 +769,31 @@ class GameState {
     return true;
   }
 
-  // 抽卡广告位：看广告免费抽一次，每日上限 3（与 adEnergy 同模式）
-  canWatchAdDraw() {
+  // 抽卡隐藏插屏广告：每日上限 + 降级判断（业务层频控；平台最小间隔由 ads.js 的 Interstitial 守卫）
+  canShowDrawInterstitial() {
     const today = this._todayKey();
-    if (this.drawAdDate !== today) { this.drawAdDate = today; this.drawAdCount = 0; }
-    return this.drawAdCount < 3 && !this.drawAdBroken;
+    if (this.interAdDate !== today) { this.interAdDate = today; this.interAdCount = 0; }
+    return this.interAdCount < DRAW_INTERSTITIAL_DAILY_CAP && !this.interAdBroken;
   }
 
-  watchAdDraw() {
-    if (!this.canWatchAdDraw()) return false;
-    this.drawAdCount++;
-    this.drawAdBroken = false; // 成功看广告 → 清除降级标志
-    return true;
+  // 实际展示一次插屏后调用：计每日次数；成功展示清除降级标志
+  markDrawInterstitialShown() {
+    this.interAdCount++;
+    this.interAdBroken = false;
+  }
+
+  /**
+   * 抽卡隐藏插屏：判定本次抽卡后是否应安排插屏（纯规则，便于测试）。
+   * 节奏：第3/6/9…抽必弹(fixed) + 非倍数抽 18% 概率随机补(random)。
+   * 注意：仅判"规则层"（每日上限 + 3抽节奏）；平台最小间隔由 ads.js 的 Interstitial 守卫。
+   * @returns {boolean}
+   */
+  shouldScheduleDrawInterstitial() {
+    if (!this.canShowDrawInterstitial()) return false; // 当日已达上限 / 降级中
+    const n = this.drawsSinceAd;
+    const fixed = (n % 3 === 0);                  // 第3/6/9抽必弹
+    const random = !fixed && Math.random() < 0.18; // 中间随机补
+    return fixed || random;
   }
 
   canSign() {
@@ -897,10 +918,14 @@ class GameState {
 
   save(force) {
     const now = Date.now();
+    if (!force) {
+      // 节流兜底（极端频繁调用）：【先判时间再算签名】——2s 内直接跳过，
+      // 避免每帧白跑 _stateSig() 的 collection 循环 + 拼大字符串（主线程 CPU 优化，直击云测 Android CPU 超标）
+      if (now - this.lastSave < 2000) return;
+    }
     const sig = this._stateSig();
     if (!force) {
-      // 节流兜底（极端频繁调用）+ 状态无变化直接跳过：核心省 CPU / 省 GC（P2）
-      if (now - this.lastSave < 2000) return;
+      // 状态无变化直接跳过：省 CPU / 省 GC（P2）
       if (sig === this._lastSaveSig) return;
     }
     this._lastSaveSig = sig;
@@ -944,9 +969,10 @@ class GameState {
         tutorialStep: this.tutorialStep,
         adEnergyDate: this.adEnergyDate,
         adEnergyCount: this.adEnergyCount,
-        drawAdDate: this.drawAdDate,
-        drawAdCount: this.drawAdCount,
-        drawAdBroken: this.drawAdBroken,
+        drawsSinceAd: this.drawsSinceAd,
+        interAdDate: this.interAdDate,
+        interAdCount: this.interAdCount,
+        interAdBroken: this.interAdBroken,
         signDate: this.signDate,
         signDay: this.signDay,
         signClaimed: this.signClaimed,
@@ -986,7 +1012,7 @@ class GameState {
     return [this.coins, this.energy, this.maxEnergy, this.inventory.length, plat,
       this.filterTier, this.shareDate, this.shareCount, this.refillDate, this.refillCount,
       this.winStreak, this.pityEpic, this.pityLegend, this.tutorialDone ? 1 : 0, this.tutorialStep,       this.adEnergyDate,
-      this.adEnergyCount, this.drawAdDate, this.drawAdCount, this.drawAdBroken ? 1 : 0,
+      this.adEnergyCount, this.drawsSinceAd, this.interAdDate, this.interAdCount, this.interAdBroken ? 1 : 0,
       this.signDate, this.signDay, this.signClaimed ? 1 : 0,
       this.signStreak, this.signMakeupDate, this.lastSeen, this.offlineRewardDate,
       this.mergeCount, this.hiddenDrops, (this.battleChest ? (this.battleChest.quality + '|' + this.battleChest.count) : ''),
@@ -1061,9 +1087,10 @@ class GameState {
       this.tutorialStep = 2;
       this.adEnergyDate = typeof data.adEnergyDate === 'string' ? data.adEnergyDate : '';
       this.adEnergyCount = Math.max(0, Number(data.adEnergyCount) || 0);
-      this.drawAdDate = typeof data.drawAdDate === 'string' ? data.drawAdDate : '';
-      this.drawAdCount = Math.max(0, Number(data.drawAdCount) || 0);
-      this.drawAdBroken = !!data.drawAdBroken;
+      this.drawsSinceAd = Math.max(0, Number(data.drawsSinceAd) || 0);
+      this.interAdDate = typeof data.interAdDate === 'string' ? data.interAdDate : '';
+      this.interAdCount = Math.max(0, Number(data.interAdCount) || 0);
+      this.interAdBroken = !!data.interAdBroken;
       this.signDate = typeof data.signDate === 'string' ? data.signDate : '';
       this.signDay = Math.max(0, Math.min(14, Number(data.signDay) || 0));
       this.signClaimed = !!data.signClaimed;
@@ -1166,10 +1193,11 @@ class GameState {
       // v2新增：广告能量系统
       if (typeof migrated.adEnergyDate !== 'string') migrated.adEnergyDate = '';
       if (typeof migrated.adEnergyCount !== 'number') migrated.adEnergyCount = 0;
-      // v2新增：抽卡广告位
-      if (typeof migrated.drawAdDate !== 'string') migrated.drawAdDate = '';
-      if (typeof migrated.drawAdCount !== 'number') migrated.drawAdCount = 0;
-      if (typeof migrated.drawAdBroken !== 'boolean') migrated.drawAdBroken = false;
+      // v2新增：抽卡隐藏插屏广告（原"看广告免费抽"按钮已合并移除）
+      if (typeof migrated.drawsSinceAd !== 'number') migrated.drawsSinceAd = 0;
+      if (typeof migrated.interAdDate !== 'string') migrated.interAdDate = '';
+      if (typeof migrated.interAdCount !== 'number') migrated.interAdCount = 0;
+      if (typeof migrated.interAdBroken !== 'boolean') migrated.interAdBroken = false;
       // v2新增：合成台三槽
       if (!Array.isArray(migrated.platform)) migrated.platform = [null, null, null];
       // v1的tierIndex范围是0-3（4品质），v2是0-4（5品质），需要映射

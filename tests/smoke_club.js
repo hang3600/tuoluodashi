@@ -76,8 +76,8 @@ console.log('\n【P0-2-d】未配置 openlink 时入口不渲染（配置门控�
   // 门控逻辑：render.js 胶囊行仅在 CONFIG.gameClubOpenlink 非空时 push club 按钮
   const renderSrc = fs.readFileSync(path.join(SRC_DIR, 'render.js'), 'utf8');
   ok('render.js 已引入 CONFIG', /require\(['"]\.\/config['"]\)/.test(renderSrc));
-  ok('club 按钮被 CONFIG.gameClubOpenlink 门控', /if \(CONFIG\.gameClubOpenlink\)[\s\S]{0,400}action: 'club'/.test(renderSrc));
-  ok('含越界兜底（窄屏不画）', /cRect\.x > 16/.test(renderSrc));
+  ok('club 按钮被 CONFIG.gameClubOpenlink 门控', /if \(CONFIG\.gameClubOpenlink[\s\S]{0,400}action: 'club'/.test(renderSrc));
+  ok('含越界兜底（窄屏/超宽不画）', /inBounds\(leftX\)/.test(renderSrc));
   ok('main.js 已接上 club 动作分发', /a === 'club'/.test(fs.readFileSync(path.join(SRC_DIR, 'main.js'), 'utf8')));
   // 当前仓库状态：尚未配置（配置后此项会转红，提醒同步更新说明）
   ok('当前 gameClubOpenlink 为空 → 入口不显示（配好后需更新本断言）', CONFIG.gameClubOpenlink === '',

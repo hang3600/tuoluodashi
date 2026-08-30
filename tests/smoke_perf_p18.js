@@ -53,7 +53,7 @@ function mkRenderer() {
   Renderer.prototype._loadIcons = function () {};
   const r = new Renderer(canvas, ctx, g, 56, 24, null);
   Renderer.prototype._loadIcons = savedLoad;
-  r._gradCache = {};
+  r._gradCache = new Map();
   return { r, ctx };
 }
 
@@ -75,11 +75,11 @@ console.log('\n【P1-8-1】传说光束：12 个渐变按索引缓存，首帧�
   const { r, ctx } = mkRenderer();
   // 用真实 Beyblade 实例（含 level/radius/power），否则 drawBeyblade → getBeybladeSprite(undefined) 会崩
   r.game.drawCard = { bb: new Beyblade(4, 1), t: 0.5 };     // 传说 tierIndex=4 → isLegend 命中
-  r._gradCache = {};
+  r._gradCache = new Map();
   r.drawDrawCard();                                   // 首帧
-  const keys1 = Object.keys(r._gradCache).filter(k => k.indexOf('legendBeam_') === 0);
+  const keys1 = [...r._gradCache.keys()].filter(k => k.indexOf('legendBeam_') === 0);
   for (let f = 0; f < 10; f++) { r.game.drawCard.t = 0.5 + f * 0.01; r.drawDrawCard(); }
-  const keys2 = Object.keys(r._gradCache).filter(k => k.indexOf('legendBeam_') === 0);
+  const keys2 = [...r._gradCache.keys()].filter(k => k.indexOf('legendBeam_') === 0);
   ok('首帧建立 12 个光束渐变缓存键', keys1.length === 12, 'keys=' + keys1.length);
   ok('后续 10 帧光束渐变缓存键不再增长（全部命中）', keys2.length === 12,
     'keys=' + keys2.length);
@@ -107,11 +107,11 @@ console.log('\n【P1-8-2】战斗盘静态装饰：构建一次，后续帧复�
 console.log('\n【P1-8-3】能量条 hlGrad：坐标恒定，走 _grad 缓存零新建');
 {
   const { r, ctx } = mkRenderer();
-  r._gradCache = {};
+  r._gradCache = new Map();
   r.drawHeader();                                    // 首帧
-  const keys1 = Object.keys(r._gradCache).filter(k => k.indexOf('energyHl|') === 0);
+  const keys1 = [...r._gradCache.keys()].filter(k => k.indexOf('energyHl|') === 0);
   for (let f = 0; f < 10; f++) r.drawHeader();        // 后续帧
-  const keys2 = Object.keys(r._gradCache).filter(k => k.indexOf('energyHl|') === 0);
+  const keys2 = [...r._gradCache.keys()].filter(k => k.indexOf('energyHl|') === 0);
   ok('energyHl 缓存键恰好 1 个（首帧建、后续命中）', keys1.length === 1,
     'keys1=' + JSON.stringify(keys1));
   ok('后续 10 帧 energyHl 缓存键不再增长', keys2.length === 1,
