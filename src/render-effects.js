@@ -24,7 +24,8 @@ const RendererEffects = {
     // HIGH 档 Android 旗舰（如 Xiaomi 13 实测 21fps）同样吃不起装饰阴影：只留触摸反馈，砍每帧模糊
     else if (this.perfLevel === 'HIGH' && !this._isIOS) low = true;
     // iOS：WebKit 软渲染阴影无 GPU 加速，大屏高配同样昂贵 → 装饰阴影强制关闭（P1 主因）
-    this.shadowScale = (low || this._isIOS) ? 0 : 1;
+    // LOW 档（lowFX===0）：最弱机器本就背不起每帧 shadowBlur，故同列入关闭集合
+    this.shadowScale = (low || this._isIOS || this.perfLevel === 'LOW') ? 0 : 1;
     // 按下态阴影：仅当用户显式关闭特效(lowFX===0)才关，否则始终保留触摸反馈
     this.pressShadow = (this.game && this.game.lowFX === 0) ? 0 : 1;
   },
