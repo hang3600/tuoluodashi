@@ -127,22 +127,47 @@ const RendererEffects = {
     ctx.globalAlpha = 1;
   },
 
-  /**
-   * 添加浮动文字（如能量+60、金币+100等）
-   */
-  addFloatText(x, y, text, color = '#ffd54f') {
-    this.floatTexts.push({ x, y, text, color, life: 1.0, maxLife: 1.0 });
+  // ── 对象池：复用粒子/浮字/光环对象，消除每帧 new/GC 抖动 → 直接压低卡顿率（vivo S1 64.4% 头号根因）──
+  _getPool(name) {
+    if (!this[name]) this[name] = [];
+    return this[name];
+  },
+
+  _getParticleCap() {
+    // 弱机砍粒子量（授权：非重要视觉删减），降低 GC 与每帧绘制开销
+    if (this.perfLevel === 'LOW') return 120;
+    if (this.perfLevel === 'MID') return 160;
+    return 200;
   },
 
   /**
-   * 绘制浮动文字（向上飘动并淡出）
+   * 添加浮动文字（如能量+60、金币+100等）；对象池复用
+   */
+  addFloatText(x, y, text, color = '#ffd54f') {
+    const pool = this._getPool('_floatTextPool');
+    const f = pool.length ? pool.pop() : {};
+    f.x = x; f.y = y; f.text = text; f.color = color;
+    f.life = 1.0; f.maxLife = 1.0;
+    if (!this.floatTexts) this.floatTexts = [];
+    this.floatTexts.push(f);
+  },
+
+  /**
+   * 绘制浮动文字（向上飘动并淡出）；消亡时 swap-remove + 入池（O(1)，避免 splice 数组重排）
    */
   drawFloatTexts(dt) {
+    const arr = this.floatTexts;
+    if (!arr || !arr.length) return;
+    const pool = this._getPool('_floatTextPool');
     const ctx = this.ctx;
-    for (let i = this.floatTexts.length - 1; i >= 0; i--) {
-      const f = this.floatTexts[i];
+    for (let i = arr.length - 1; i >= 0; i--) {
+      const f = arr[i];
       if (!this._debugFreezeFx) { f.life -= dt; f.y -= dt * 26; }
-      if (f.life <= 0) { this.floatTexts.splice(i, 1); continue; }
+      if (f.life <= 0) {
+        arr[i] = arr[arr.length - 1]; arr.pop();
+        if (pool.length < 64) pool.push(f);
+        continue;
+      }
       ctx.globalAlpha = Math.max(0, f.life / f.maxLife);
       ctx.fillStyle = f.color;
       ctx.font = 'bold 16px ' + APPLE_FONT;
@@ -154,34 +179,48 @@ const RendererEffects = {
   },
 
   /**
-   * 绘制粒子和环形冲击波
+   * 绘制粒子和环形冲击波；对象池复用 + swap-remove 回收
    */
   drawParticles(dt) {
     const ctx = this.ctx;
-    for (let i = this.particles.length - 1; i >= 0; i--) {
-      const p = this.particles[i];
-      if (!this._debugFreezeFx) {
-        p.life -= dt;
-        p.x += p.vx * dt; p.y += p.vy * dt;
+    const parr = this.particles;
+    if (parr && parr.length) {
+      const ppool = this._getPool('_particlePool');
+      for (let i = parr.length - 1; i >= 0; i--) {
+        const p = parr[i];
+        if (!this._debugFreezeFx) {
+          p.life -= dt;
+          p.x += p.vx * dt; p.y += p.vy * dt;
+        }
+        if (p.life <= 0) {
+          parr[i] = parr[parr.length - 1]; parr.pop();
+          if (ppool.length < 256) ppool.push(p);
+          continue;
+        }
+        ctx.globalAlpha = p.life / p.maxLife;
+        ctx.fillStyle = p.color;
+        ctx.beginPath();
+        ctx.arc(p.x, p.y, p.size, 0, Math.PI * 2);
+        ctx.fill();
       }
-      if (p.life <= 0) { this.particles.splice(i, 1); continue; }
-      ctx.globalAlpha = p.life / p.maxLife;
-      ctx.fillStyle = p.color;
-      ctx.beginPath();
-      ctx.arc(p.x, p.y, p.size, 0, Math.PI * 2);
-      ctx.fill();
+      ctx.globalAlpha = 1;
     }
-    ctx.globalAlpha = 1;
 
     // 环形冲击波（合成成功等）
-    if (this.rings) {
-      for (let i = this.rings.length - 1; i >= 0; i--) {
-        const r = this.rings[i];
+    const rarr = this.rings;
+    if (rarr && rarr.length) {
+      const rpool = this._getPool('_ringPool');
+      for (let i = rarr.length - 1; i >= 0; i--) {
+        const r = rarr[i];
         if (!this._debugFreezeFx) {
           r.radius += (r.maxRadius - r.radius) * dt * 6 + 30 * dt;
           r.alpha -= dt * 1.2;
         }
-        if (r.alpha <= 0 || r.radius >= r.maxRadius) { this.rings.splice(i, 1); continue; }
+        if (r.alpha <= 0 || r.radius >= r.maxRadius) {
+          rarr[i] = rarr[rarr.length - 1]; rarr.pop();
+          if (rpool.length < 32) rpool.push(r);
+          continue;
+        }
         ctx.save();
         ctx.globalAlpha = Math.max(0, r.alpha);
         ctx.strokeStyle = r.color;
@@ -197,33 +236,39 @@ const RendererEffects = {
   },
 
   /**
-   * 添加粒子效果（合成成功、抽卡等）
+   * 添加粒子效果（合成成功、抽卡等）；对象池复用，弱机降低硬上限
    */
   addParticles(x, y, color, count = 12) {
-    if (this.particles.length >= 200) return; // 防御性硬上限：UI 粒子过多时丢弃，避免 GC 雪崩
-    const remain = 200 - this.particles.length;
+    if (!this.particles) this.particles = [];
+    const cap = this._getParticleCap();
+    if (this.particles.length >= cap) return; // 防御性硬上限：UI 粒子过多时丢弃，避免 GC 雪崩
+    const remain = cap - this.particles.length;
     if (count > remain) count = remain;
+    const pool = this._getPool('_particlePool');
     for (let i = 0; i < count; i++) {
       const angle = Math.random() * Math.PI * 2;
       const speed = 60 + Math.random() * 80;
-      this.particles.push({
-        x, y,
-        vx: Math.cos(angle) * speed,
-        vy: Math.sin(angle) * speed,
-        size: 2 + Math.random() * 3,
-        color,
-        life: 0.4 + Math.random() * 0.4,
-        maxLife: 0.8
-      });
+      const p = pool.length ? pool.pop() : {};
+      p.x = x; p.y = y;
+      p.vx = Math.cos(angle) * speed;
+      p.vy = Math.sin(angle) * speed;
+      p.size = 2 + Math.random() * 3;
+      p.color = color;
+      p.life = 0.4 + Math.random() * 0.4;
+      p.maxLife = 0.8;
+      this.particles.push(p);
     }
   },
 
   /**
-   * 环形扩散冲击波（合成成功 / 升级时用），跟随 renderer 帧更新
+   * 环形扩散冲击波（合成成功 / 升级时用），跟随 renderer 帧更新；对象池复用
    */
   addRing(x, y, color) {
     if (!this.rings) this.rings = [];
-    this.rings.push({ x, y, color, radius: 8, maxRadius: 90, alpha: 0.8 });
+    const pool = this._getPool('_ringPool');
+    const r = pool.length ? pool.pop() : {};
+    r.x = x; r.y = y; r.color = color; r.radius = 8; r.maxRadius = 90; r.alpha = 0.8;
+    this.rings.push(r);
   },
 
   /**
