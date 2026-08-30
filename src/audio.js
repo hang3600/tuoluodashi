@@ -1,12 +1,23 @@
 /**
  * 音效管理：零素材依赖，使用 WebAudio 合成
  * 微信小游戏与浏览器通用（wx.createWebAudioContext / window.AudioContext）
+ *
+ * 跨平台音频策略（2026-08-30 修复 #4/#5/#6）：
+ *  - #4 iOS 硬件静音拨片无法静音 WebAudio（Apple 平台特性），故统一走「软件音量/静音」：
+ *    masterGain 覆盖所有输出，iOS / Android 行为一致；若将来引入文件音(inner audio)，
+ *    wx.setInnerAudioOption({ obeyMuteSwitch:true }) 让其在 iOS 上也尊重静音键。
+ *  - #5 Android 无 onAudioInterruption 事件，来电未进后台时 AudioContext 挂起不自愈；
+ *    由 input.js 在每次触摸时调用 Sfx.ensureRunning() 兜底恢复（iOS 仍保留打断事件）。
+ *  - #6 旋转风声（白噪声长循环 + 实时增益调制）在 iOS 部分版本易爆音：噪声缓冲首尾淡入/淡出
+ *    消除 loop 接缝咔哒；起停均经 masterGain 并用 setTargetAtTime 平滑，停声前先 ramp 到 0。
  */
 
 const Sfx = {
   ctx: null,
   muted: false,
+  volume: 1,
   ready: false,
+  _master: null,
 
   init() {
     if (this.ready) {
@@ -22,9 +33,36 @@ const Sfx = {
     } catch (e) {
       console.warn('audio init failed', e);
     }
+
+    // #4 跨平台 parity：iOS 硬件静音拨片无法静音 WebAudio，统一用软件音量/静音覆盖两端。
+    // 若后续引入文件音（inner audio），obeyMuteSwitch 让其在 iOS 也尊重静音键。
+    if (typeof wx !== 'undefined' && wx.setInnerAudioOption) {
+      try { wx.setInnerAudioOption({ obeyMuteSwitch: true, mixWithOther: false }); } catch (e) {}
+    }
+
     this._loadMuted();
+    this._loadVolume();
+    this._buildMaster();
     this.ready = true;
     this.resume();   // iOS：创建后立即尝试 resume（首次必须在用户手势内，由 input.js 的 unlock 触发）
+  },
+
+  /** 建立 masterGain：所有音效（含旋转风声）经此输出，软件音量/静音统一控制 */
+  _buildMaster() {
+    if (!this.ctx) return;
+    try {
+      const g = this.ctx.createGain();
+      g.gain.value = this.muted ? 0 : this.volume;
+      g.connect(this.ctx.destination);
+      this._master = g;
+    } catch (e) { this._master = null; }
+  },
+
+  /** 输出节点：优先 masterGain（受软件音量/静音控制），降级直连 destination */
+  _out() {
+    if (this._master) return this._master;
+    if (this.ctx && this.ctx.destination) return this.ctx.destination;
+    return null;
   },
 
   /** 在用户手势内调用：创建并恢复 AudioContext（iOS 仅允许在手势内解锁音频） */
@@ -38,6 +76,20 @@ const Sfx = {
       const r = this.ctx.resume();
       if (r && r.catch) r.catch(() => {});
     }
+  },
+
+  /**
+   * #5 跨平台自愈：任意用户手势 / 每帧调用，suspended 时恢复 AudioContext。
+   * 覆盖 Android 无 onAudioInterruption 事件、来电未进后台导致音频挂起不恢复的缺口。
+   * @returns {boolean} 若本次触发了恢复返回 true
+   */
+  ensureRunning() {
+    if (this.ctx && this.ctx.state === 'suspended') {
+      const r = this.ctx.resume();
+      if (r && r.catch) r.catch(() => {});
+      return true;
+    }
+    return false;
   },
 
   _loadMuted() {
@@ -60,12 +112,54 @@ const Sfx = {
     } catch (e) {}
   },
 
+  _loadVolume() {
+    try {
+      let v = null;
+      if (typeof wx !== 'undefined' && wx.getStorageSync) {
+        const s = wx.getStorageSync('bb_volume');
+        if (s !== '' && s !== null && s !== undefined) v = parseFloat(s);
+      } else if (typeof localStorage !== 'undefined') {
+        const s = localStorage.getItem('bb_volume');
+        if (s !== null) v = parseFloat(s);
+      }
+      if (v === null || isNaN(v) || v < 0 || v > 1) v = 1;
+      this.volume = v;
+    } catch (e) { this.volume = 1; }
+  },
+
+  _saveVolume() {
+    try {
+      if (typeof wx !== 'undefined' && wx.setStorageSync) {
+        wx.setStorageSync('bb_volume', this.volume);
+      } else if (typeof localStorage !== 'undefined') {
+        localStorage.setItem('bb_volume', String(this.volume));
+      }
+    } catch (e) {}
+  },
+
+  /** 设置软件音量（0..1），平滑 ramp；与静音标志独立。iOS 等效于 Android「音量=0 静音」 */
+  setVolume(v) {
+    this.init();
+    v = Math.max(0, Math.min(1, v));
+    this.volume = v;
+    this._saveVolume();
+    if (this._master && this.ctx) {
+      const now = this.ctx.currentTime;
+      this._master.gain.setTargetAtTime(this.muted ? 0 : v, now, 0.02);
+    }
+  },
+
   toggle() {
     this.init();   // 确保 ctx 已创建（首次点静音也要初始化，否则下次 play 才建）
     this.muted = !this.muted;
     this._saveMuted();
+    // 静音走 masterGain 即时归零，覆盖旋转声等所有输出，无需等 stopSpin
+    if (this._master && this.ctx) {
+      const now = this.ctx.currentTime;
+      this._master.gain.setTargetAtTime(this.muted ? 0 : this.volume, now, 0.02);
+    }
     if (!this.muted) this.play('click');
-    else this.stopSpin();   // 静音时停掉旋转摩擦声
+    else this.stopSpin();   // 静音时停掉旋转摩擦声（省 CPU）
     return this.muted;
   },
 
@@ -75,6 +169,8 @@ const Sfx = {
     if (this.muted || !this.ctx) return;
     this.resume();
     const ctx = this.ctx;
+    const out = this._out();
+    if (!out) return;
     // 首次：建立 噪声源(循环) → 低通滤波 → 增益 链路
     if (!this._spinSrc) {
       const buf = this._noiseBuffer(ctx);
@@ -87,7 +183,7 @@ const Sfx = {
         filter.type = 'lowpass';
         const g = ctx.createGain();
         g.gain.value = 0;
-        src.connect(filter); filter.connect(g); g.connect(ctx.destination);
+        src.connect(filter); filter.connect(g); g.connect(out);
         src.start();
         this._spinSrc = src; this._spinFilter = filter; this._spinGain = g;
       } catch (e) { this._spinSrc = null; return; }
@@ -98,20 +194,41 @@ const Sfx = {
     const g2 = this._spinGain;
     if (g2) {
       const targetGain = Math.min(0.03 + speedRatio * 0.05, 0.09);   // 音量小，柔和不吵
-      g2.gain.setTargetAtTime(targetGain, now, 0.1);
-      this._spinFilter.frequency.setTargetAtTime(cutoff, now, 0.1);
+      // #6 平滑调制：setTargetAtTime 避免直接赋值产生的 zipper 噪声
+      g2.gain.setTargetAtTime(targetGain, now, 0.08);
+      this._spinFilter.frequency.setTargetAtTime(cutoff, now, 0.08);
     }
   },
 
-  /** 停掉旋转摩擦声 */
+  /** 停掉旋转摩擦声（#6：先平滑 ramp 到 0 再停，避免挂起/停止瞬间的爆音/咔哒） */
   stopSpin() {
-    if (this._spinSrc) {
-      try { this._spinSrc.stop(); } catch (e) {}
-      try { this._spinSrc.disconnect(); } catch (e) {}
-    }
-    if (this._spinFilter) { try { this._spinFilter.disconnect(); } catch (e) {} }
-    if (this._spinGain) { try { this._spinGain.disconnect(); } catch (e) {} }
+    const ctx = this.ctx;
+    const src = this._spinSrc, filter = this._spinFilter, g = this._spinGain;
+    // 先清空引用，避免重复 stop
     this._spinSrc = null; this._spinFilter = null; this._spinGain = null;
+    if (!src) return;
+    if (g && ctx) {
+      try {
+        const now = ctx.currentTime;
+        g.gain.cancelScheduledValues(now);
+        g.gain.setTargetAtTime(0, now, 0.012);          // ~36ms 平滑归零
+        const stopAt = now + 0.06;
+        try { src.stop(stopAt); } catch (e) {}          // 归零后再停，无咔哒
+        // 延迟断开，避免切断 60ms 渐隐尾巴
+        const f = filter, gg = g;
+        setTimeout(() => {
+          try { src.disconnect(); } catch (e) {}
+          try { f && f.disconnect(); } catch (e) {}
+          try { gg && gg.disconnect(); } catch (e) {}
+        }, 120);
+        return;
+      } catch (e) {}
+    }
+    // 降级：直接停 + 立即断开
+    try { src.stop(); } catch (e) {}
+    try { src.disconnect(); } catch (e) {}
+    try { filter && filter.disconnect(); } catch (e) {}
+    try { g && g.disconnect(); } catch (e) {}
   },
 
   /**
@@ -151,6 +268,8 @@ const Sfx = {
     // resume 后该时刻已被"跨过"→ 首声被丢弃（首声静音 bug）。未 running 时向前错开 60ms 确保发声。
     const lead = ctx.state === 'running' ? 0 : 0.06;
     const now = ctx.currentTime + lead;
+    const out = this._out();
+    if (!out) return;
     // 鞭响：噪声爆音层（短促、高频、快速衰减——模拟鞭子"啪"）
     if (noise) {
       const buf = this._noiseBuffer(ctx);
@@ -161,7 +280,7 @@ const Sfx = {
           const ng = ctx.createGain();
           ng.gain.setValueAtTime(gain, now);
           ng.gain.exponentialRampToValueAtTime(0.0001, now + dur);
-          src.connect(ng); ng.connect(ctx.destination);
+          src.connect(ng); ng.connect(out);
           src.start(now); src.stop(now + dur + 0.02);
         } catch (e) {}
       }
@@ -176,12 +295,12 @@ const Sfx = {
     g.gain.exponentialRampToValueAtTime(0.0001, now + dur);
 
     osc.connect(g);
-    g.connect(ctx.destination);
+    g.connect(out);
     osc.start(now);
     osc.stop(now + dur + 0.02);
   },
 
-  /** 预生成 1s 白噪声 Buffer（鞭响噪声层，复用避免每次创建） */
+  /** 预生成 1s 白噪声 Buffer（鞭响噪声层，复用避免每次创建）；#6 首尾淡入/淡出消除 loop 接缝爆音 */
   _noiseBuffer(ctx) {
     if (this._noiseBuf && this._noiseBuf.ctx === ctx) return this._noiseBuf.buf;
     try {
@@ -189,6 +308,13 @@ const Sfx = {
       const buf = ctx.createBuffer(1, len, ctx.sampleRate);
       const data = buf.getChannelData(0);
       for (let i = 0; i < len; i++) data[i] = Math.random() * 2 - 1;
+      // 首尾各 ~12ms 线性淡入/淡出，使 loop 接缝振幅≈0（无缝循环，消除周期性咔哒）
+      const fade = Math.min(512, Math.floor(len / 8));
+      for (let i = 0; i < fade; i++) {
+        const w = i / fade;
+        data[i] *= w;                  // 开头淡入 0→1
+        data[len - 1 - i] *= w;        // 结尾淡出 1→0
+      }
       this._noiseBuf = { ctx, buf };
       return buf;
     } catch (e) { return null; }

@@ -147,22 +147,23 @@ function lateResize(game, canvas) {
     const realH = (info.windowHeight > 0) ? info.windowHeight : 0;
     // 真机全屏：高度用全屏逻辑高（screenHeight/pixelRatio），避免底部黑边/变形
     const fullH = (info.screenHeight > 0 && info.pixelRatio > 0) ? Math.max(realH, Math.round(info.screenHeight / info.pixelRatio)) : realH;
-    const rs = (game && game.renderScale) || 1;
-    const logicalW = (realW > 0) ? Math.max(240, Math.round(realW / rs)) : 0;
-    const logicalH = (fullH > 0) ? Math.max(320, Math.round(fullH / rs)) : 0;
-    // 只在尺寸确实变化时更新
-    if (logicalW > 0 && logicalH > 0 && (logicalW !== canvas.width || logicalH !== canvas.height)) {
-      canvas.width = logicalW;
-      canvas.height = logicalH;
-      if (typeof game.updateSafeArea === 'function') {
-        game.updateSafeArea(info);
-      }
-      console.log('[boot] lateResize updated:', logicalW + 'x' + logicalH, '(rs=' + rs + ')');
+    // 【跨平台修复 #3】DPR 超采样：canvas 物理尺寸 = 逻辑 × dpr（与 Main 构造一致）。
+    // 逻辑尺寸(lw/lh)作为布局基准恒定，物理缓冲交给 canvas 承担。
+    const dpr = (game && game.dpr) || 1;
+    const lw = (realW > 0) ? Math.max(240, Math.round(realW)) : 0;
+    const lh = (fullH > 0) ? Math.max(320, Math.round(fullH)) : 0;
+    const physicalW = Math.round(lw * dpr);
+    const physicalH = Math.round(lh * dpr);
+    // 只在物理尺寸确实变化时更新（canvas.width 现存储物理像素）
+    if (physicalW > 0 && physicalH > 0 && (physicalW !== canvas.width || physicalH !== canvas.height)) {
+      canvas.width = physicalW;
+      canvas.height = physicalH;
+      if (typeof game.onResize === 'function') game.onResize(lw, lh);
+      if (typeof game.updateSafeArea === 'function') game.updateSafeArea(info);
+      console.log('[boot] lateResize updated:', physicalW + 'x' + physicalH, '(logical ' + lw + 'x' + lh + ', dpr=' + dpr + ')');
     }
     // 安全区也更新（即使尺寸没变，safeTop/SafeBottom 可能初始不准）
-    if (typeof game.updateSafeArea === 'function') {
-      game.updateSafeArea(info);
-    }
+    if (typeof game.updateSafeArea === 'function') game.updateSafeArea(info);
   } catch (e) {
     console.warn('[boot] lateResize failed:', e);
   }

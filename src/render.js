@@ -33,15 +33,18 @@ class Renderer {
     this.canvas = canvas;
     this.ctx = ctx;
     this.game = game;
-    this.width = canvas.width;
-    this.height = canvas.height;
+    // 【跨平台修复 #3】逻辑尺寸 = canvas 物理尺寸 / dpr（canvas 物理由 Main 按 DPR 超采样设定）；
+    // 所有绘制坐标用逻辑像素，由 render(dt) 每帧 setTransform(dpr) 映射到物理像素。
+    this.dpr = (canvas && canvas.dpr) || 1;
+    this.width = (canvas && canvas.width > 0) ? canvas.width / this.dpr : 375;
+    this.height = (canvas && canvas.height > 0) ? canvas.height / this.dpr : 667;
     // 安全区域统一处理：验证和修正safeTop/safeBottom，确保在合理范围内
     // - safeTop：最小20px（状态栏），最大120px（避免异常值导致布局错位）
     // - safeBottom：最小10px（Home指示条），最大80px（避免异常值导致布局错位）
     // - 安全区域总和不超过屏幕高度的30%（避免异常值导致内容区域过小）
     const rawSafeTop = typeof safeTop === 'number' && safeTop > 0 ? safeTop : 56;
     const rawSafeBottom = typeof safeBottom === 'number' && safeBottom > 0 ? safeBottom : 24;
-    const maxSafeTotal = canvas.height * 0.3;
+    const maxSafeTotal = this.height * 0.3;
     this.safeTop = Math.max(20, Math.min(120, rawSafeTop));
     this.safeBottom = Math.max(10, Math.min(80, rawSafeBottom));
     if (this.safeTop + this.safeBottom > maxSafeTotal) {
@@ -462,7 +465,10 @@ class Renderer {
 
   resize(w, h) {
     this.width = w; this.height = h;
-    this.canvas.width = w; this.canvas.height = h;
+    // 【跨平台修复 #3】canvas 物理尺寸 = 逻辑(w/h) × dpr
+    const d = this.dpr || 1;
+    this.canvas.width = Math.round(w * d);
+    this.canvas.height = Math.round(h * d);
     this._reflow();
     this._layoutSig = this._curSig();
   }
@@ -484,9 +490,12 @@ class Renderer {
     else if (this.perfLevel === 'MID') low = true;
     // HIGH 档 Android 旗舰（如 Xiaomi 13 实测 21fps）同样吃不起装饰阴影：只留触摸反馈，砍每帧模糊
     else if (this.perfLevel === 'HIGH' && !this._isIOS) low = true;
-    // iOS：WebKit 软渲染阴影无 GPU 加速，大屏高配同样昂贵 → 装饰阴影强制关闭（P1 主因）
-    // LOW 档（lowFX===0）：最弱机器本就背不起每帧 shadowBlur，故同列入关闭集合
-    this.shadowScale = (low || this._isIOS || this.perfLevel === 'LOW') ? 0 : 1;
+    // 【跨平台修复 #2】原 shadowScale 因 `this._isIOS` 强制关闭 + MID/Android-HIGH 也关，
+    // 导致所有设备装饰阴影实际恒为 0（iOS 高配被平台一刀切亏待）。
+    // 改为：仅 HIGH 档 iOS 旗舰放开装饰阴影；其余维持原性能决策
+    // —— MID/LOW/compact/lowFX===0 关，Android HIGH 旗舰仍关（实测软阴影贵：Xiaomi 13→21fps）。
+    const allowShadow = (this.perfLevel === 'HIGH' && this._isIOS);
+    this.shadowScale = (low || !allowShadow) ? 0 : 1;
     // 按下态阴影：仅当用户显式关闭特效(lowFX===0)才关，否则始终保留触摸反馈
     this.pressShadow = (this.game && this.game.lowFX === 0) ? 0 : 1;
   }
@@ -3555,6 +3564,11 @@ class Renderer {
   }
 
   render(dt) {
+    // 【跨平台修复 #3】每帧以 DPR 为基准变换：所有绘制坐标按逻辑像素，由 setTransform(dpr) 映射到物理像素。
+    // canvas 物理尺寸 = 逻辑 × dpr，故逻辑坐标经此变换恰好落到物理像素，画面高清且不越界。
+    // 特性检测：真实微信 Canvas2D ctx 必有 setTransform；测试 mock 缺失时安全跳过（不影响逻辑校验）。
+    const dprT = this.dpr || 1;
+    if (this.ctx.setTransform) this.ctx.setTransform(dprT, 0, 0, dprT, 0, 0);
     this._frameCount = (this._frameCount || 0) + 1;
     // 首帧极简渲染：仅背景+标题，保证像素立即上屏（避免白屏、压首屏渲染耗时）
     if (this._frameCount <= 2) {

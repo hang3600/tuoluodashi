@@ -71,11 +71,18 @@ class Main {
     // ============================================================
     let perfLevel = 'MID';
     try {
-      let bl = -1;
-      if (typeof wx !== 'undefined' && wx.getSystemInfoSync) {
-        const si = wx.getSystemInfoSync();
-        if (si && typeof si.benchmarkLevel === 'number') bl = si.benchmarkLevel;
-        if (bl < 0 && si && typeof si.model === 'string') {
+      // 优先用构造传入的 sysInfo（与后续 safeTop/DPR 同源，避免重复 getSystemInfoSync）
+      const si = (sysInfo && typeof sysInfo.benchmarkLevel === 'number') ? sysInfo
+                : (typeof wx !== 'undefined' && wx.getSystemInfoSync ? wx.getSystemInfoSync() : null);
+      if (si) {
+        let bl = (typeof si.benchmarkLevel === 'number') ? si.benchmarkLevel : -1;
+        // 【跨平台修复 #1】iOS 平台微信 benchmarkLevel 普遍虚低（同档实测渲染能力优于 Android），
+        // 统一阈值会把 iPhone 中端误判为 MID → 对战被强制 30fps（main.js:987），明显比同档安卓卡、画质还降级。
+        // 补偿偏移让 iOS 分档回归真实能力（仅影响分档，不动画质/阴影逻辑；LOW 档阈值 30 不变）。
+        // 偏移量取 25：iPhone 中端(benchmark≈40)补后≈65→HIGH，对战 45fps；老 iOS(benchmark≈15)补后≈40→MID 仍保守。
+        const isIOS = /ios/i.test(si.system || '') || si.platform === 'ios';
+        if (bl >= 0 && isIOS) bl = bl + 25;
+        if (bl < 0 && typeof si.model === 'string') {
           // 兜底：旧基础库无 benchmarkLevel，用内存/机型粗判
           const m = si.model.toLowerCase();
           if (si.deviceMemory && si.deviceMemory <= 2) bl = 20;
@@ -99,15 +106,26 @@ class Main {
     // LOW 内细分：bl<15 最差机（荣耀Play5T/Helio G25）0.55 倍（-70%），
     // bl 15-25 入门机 0.65 倍（-58%），其余 LOW 0.75 倍（-44%）。
     // ============================================================
-    // 真机全屏修复（v3）：禁用 renderScale 缩小 canvas。
-    // 微信小游戏主屏 canvas 的显示区域 = canvas 像素尺寸（真机不自动拉伸到全屏），
-    // 原 LOW 档把 canvas 缩到 55%~75% → 真机画面只占屏幕一部分、右侧黑屏。
-    // 修复：canvas 恒定 windowWidth×windowHeight（逻辑尺寸），
-    //       LOW 档省性能改由 lowFX 画质档承担（关装饰阴影/减粒子/30fps），不再降分辨率。
     // ============================================================
-    const renderScale = 1;
-    this.renderScale = renderScale;
-    if (typeof canvas === 'object' && canvas) canvas.renderScale = 1; // input 坐标反缩放（恒 1）
+    // 【跨平台修复 #3】canvas DPR 超采样（iOS/Android 清晰度统一）
+    // 屏幕逻辑像素 = canvas 初始尺寸（game.js 已设为 windowWidth × fullH），作为布局基准恒定不变。
+    // 非 LOW 档启用 DPR 超采样：canvas 物理尺寸 = 逻辑 × dpr（封顶 2，平衡清晰度与内存/纹理上限）；
+    // 所有绘制坐标保持逻辑像素，由主循环每帧 ctx.setTransform(dpr) 映射到物理像素。
+    // LOW 档(最弱机)保持 1x，避免像素量×4致软渲染掉帧雪崩（呼应此前 945MB/卡顿治理）。
+    // input 触摸坐标为物理像素，按 canvas.renderScale(=dpr) 反缩放回逻辑坐标。
+    // ============================================================
+    this.cw = canvas.width;            // 逻辑宽（布局基准，恒定，不随 DPR 变）
+    this.ch = canvas.height;           // 逻辑高
+    const _sysDpr = (sysInfo && sysInfo.pixelRatio > 0) ? sysInfo.pixelRatio : 1;
+    const dpr = (this.perfLevel === 'LOW') ? 1 : Math.min(_sysDpr, 2);
+    this.dpr = dpr;
+    if (typeof canvas === 'object' && canvas) {
+      canvas.dpr = dpr;
+      canvas.width = Math.round(this.cw * dpr);
+      canvas.height = Math.round(this.ch * dpr);
+    }
+    this.renderScale = dpr;
+    if (typeof canvas === 'object' && canvas) canvas.renderScale = dpr; // input 坐标反缩放（物理→逻辑）
 
     // 胶囊矩形：物理像素 → canvas 逻辑坐标（canvas 逻辑宽 = windowWidth）
     if (this._menuBtnRaw) {
@@ -119,7 +137,7 @@ class Main {
       // 换算基准是 canvas 逻辑宽（= windowWidth）。Main 类没有 this.width 字段，
       // 此前写 this.width 恒为 undefined → 取 375，在 393 宽的机型上系数只有 0.954，
       // 胶囊矩形与安全区都被缩小约 4.6%。与 updateSafeArea 保持同一写法。
-      const css = Math.max(0.1, (this.canvas && this.canvas.width > 0 ? this.canvas.width : 375) / Math.max(1, _sw));
+      const css = Math.max(0.1, (this.canvas && this.cw > 0 ? this.cw : 375) / Math.max(1, _sw));
       this.menuBtn = {
         left: Math.round(this._menuBtnRaw.left * css),
         top: Math.round(this._menuBtnRaw.top * css),
@@ -134,7 +152,7 @@ class Main {
         const _si2 = (typeof wx !== 'undefined' && wx.getSystemInfoSync) ? wx.getSystemInfoSync() : null;
         if (_si2 && _si2.screenWidth > 0) _sw2 = _si2.screenWidth;
       } catch (e) {}
-      const c2 = Math.max(0.1, (this.canvas && this.canvas.width > 0 ? this.canvas.width : 375) / Math.max(1, _sw2));
+      const c2 = Math.max(0.1, (this.canvas && this.cw > 0 ? this.cw : 375) / Math.max(1, _sw2));
       this.safeTop = Math.max(20, Math.round(this._safeTopRaw * c2));
       this.safeBottom = Math.max(10, Math.round(this._safeBottomRaw * c2));
     }
@@ -258,7 +276,7 @@ class Main {
         const _si = (typeof wx !== 'undefined' && wx.getSystemInfoSync) ? wx.getSystemInfoSync() : null;
         if (_si && _si.screenWidth > 0) _sw = _si.screenWidth;
       } catch (e) {}
-      const css = Math.max(0.1, (this.canvas && this.canvas.width > 0 ? this.canvas.width : 375) / Math.max(1, _sw));
+      const css = Math.max(0.1, (this.canvas && this.cw > 0 ? this.cw : 375) / Math.max(1, _sw));
       // 从物理基准（_safeTopRaw）重新计算，避免与已换算的逻辑值混算
       let safeTop = this._safeTopRaw || 56;
       let safeBottom = this._safeBottomRaw || 24;
@@ -292,18 +310,35 @@ class Main {
       if (this.renderer) {
         this.renderer.safeTop = this.safeTop;
         this.renderer.safeBottom = this.safeBottom;
-        this.renderer.W = this.canvas.width;
-        this.renderer.H = this.canvas.height;
+        this.renderer.W = this.cw;
+        this.renderer.H = this.ch;
         if (this.menuBtn) this.renderer.menuBtn = this.menuBtn;
       }
       if (this.game && this.game.battle) {
-        this.game.battle.width = this.canvas.width;
-        this.game.battle.height = this.canvas.height;
+        this.game.battle.width = this.cw;
+        this.game.battle.height = this.ch;
         this.game.battle.safeTop = this.safeTop;
         this.game.battle.safeBottom = this.safeBottom;
       }
     } catch (e) {
       console.warn('[updateSafeArea]', e);
+    }
+  }
+
+  /**
+   * 旋转/尺寸变更回调（lateResize 触发）：更新逻辑尺寸并同步渲染器。
+   * canvas 物理尺寸已由 lateResize 按 DPR 设定，这里只更新逻辑基准(cw/ch)与渲染器布局。
+   */
+  onResize(lw, lh) {
+    try {
+      this.cw = lw; this.ch = lh;
+      if (this.renderer) this.renderer.resize(lw, lh);
+      if (this.game && this.game.battle) {
+        this.game.battle.width = lw;
+        this.game.battle.height = lh;
+      }
+    } catch (e) {
+      console.warn('[onResize]', e);
     }
   }
 
@@ -358,8 +393,8 @@ class Main {
             } else if (a === 'merge') {
               const merged = this.game.tryMerge();
               if (merged) {
-                const cx = this.canvas.width / 2;
-                const cy = (this.renderer.layout && this.renderer.layout.arenaCy) || (this.canvas.height * 0.42);
+                const cx = this.cw / 2;
+                const cy = (this.renderer.layout && this.renderer.layout.arenaCy) || (this.ch * 0.42);
                 const fromLv = merged.level - 1; // 合成前等级（升级反馈）
                 const col = merged.tier.color;
                 const isBig = merged.tierIndex >= 4;
@@ -395,8 +430,8 @@ class Main {
                   }
                 }
                 if (maxed) {
-                  const mx = this.canvas.width / 2;
-                  const my = (this.renderer.layout && this.renderer.layout.arenaCy) || (this.canvas.height * 0.42);
+                  const mx = this.cw / 2;
+                  const my = (this.renderer.layout && this.renderer.layout.arenaCy) || (this.ch * 0.42);
                   this.renderer.addParticles(mx, my, '#ff5252', 18);
                   this.renderer.addFloatText(mx, my - 40, '已达满级 Lv5', '#ff5252');
                   this.renderer.addFloatText(mx, my - 62, '不可再合成', '#ffd54f');
@@ -466,7 +501,7 @@ class Main {
                 this.audio.play('win');
                 let txt = r.grand ? '回归大礼包：+' + r.coins + '金币 能量回满' : '回归礼包：+' + r.coins + '金币 能量回满';
                 if (r.coupon) txt += ' · 传说保底券';
-                this.renderer.addFloatText(this.canvas.width / 2, this.canvas.height * 0.4, txt, '#ffd54f');
+                this.renderer.addFloatText(this.cw / 2, this.ch * 0.4, txt, '#ffd54f');
                 this._toast(txt);
               }
             }
@@ -482,7 +517,7 @@ class Main {
                   const r = this.game.openBattleChest(true);
                   if (r) {
                     this.audio.play('win');
-                    this.renderer.addParticles(this.canvas.width / 2, this.canvas.height * 0.4, '#ffd54f', 30);
+                    this.renderer.addParticles(this.cw / 2, this.ch * 0.4, '#ffd54f', 30);
                     this._toast('宝箱开启：' + r.reward.name + (r.reward.type === 'beyblade' ? ' 入账！' : ''));
                   } else { this._toast('没有可开的宝箱'); }
                   if (!this.game.battleChest) this.game.battleChestOpen = false;
@@ -495,7 +530,7 @@ class Main {
               const r = this.game.openBattleChest(false);
               if (r) {
                 this.audio.play('win');
-                this.renderer.addParticles(this.canvas.width / 2, this.canvas.height * 0.4, '#ffd54f', 30);
+                this.renderer.addParticles(this.cw / 2, this.ch * 0.4, '#ffd54f', 30);
                 this._toast('宝箱开启：' + r.reward.name + (r.reward.type === 'beyblade' ? ' 入账！' : ''));
               } else { this._toast('今日直接开已用 · 可看广告开'); }
               if (!this.game.battleChest) this.game.battleChestOpen = false;
@@ -505,7 +540,7 @@ class Main {
               const r = this.game.openBattleChest(false, true);
               if (r) {
                 this.audio.play('win');
-                this.renderer.addParticles(this.canvas.width / 2, this.canvas.height * 0.4, '#ffd54f', 30);
+                this.renderer.addParticles(this.cw / 2, this.ch * 0.4, '#ffd54f', 30);
                 this._toast('宝箱开启：' + r.reward.name + (r.reward.type === 'beyblade' ? ' 入账！' : ''));
               } else { this._toast('暂无可开宝箱'); }
               this.game.battleChestOpen = false;
@@ -520,7 +555,7 @@ class Main {
               if (this.game.claimBoost()) {
                 this.audio.play('win');
                 this._toast('好友助力 +15 能量 · 今日 ' + this.game.boostCount + '/5');
-                this.renderer.addFloatText(this.canvas.width / 2, this.canvas.height * 0.4, '+15 能量', '#ffd54f');
+                this.renderer.addFloatText(this.cw / 2, this.ch * 0.4, '+15 能量', '#ffd54f');
               } else { this._toast('今日助力已领完（5/5），明天再来'); }
             }
             else if (a === 'daily') { this.game._checkDailyReset(); this.game.dailyOpen = true; this.audio.play('click'); }
@@ -532,8 +567,8 @@ class Main {
               const gain = this.game.confirmSell();
               if (gain) {
                 this.audio.play('merge');
-                this.renderer.addParticles(this.canvas.width / 2, this.canvas.height / 2, '#ffd54f', 16);
-                this.renderer.addFloatText(this.canvas.width / 2, this.canvas.height / 2 - 30, '+' + gain + ' 金币', '#ffd54f');
+                this.renderer.addParticles(this.cw / 2, this.ch / 2, '#ffd54f', 16);
+                this.renderer.addFloatText(this.cw / 2, this.ch / 2 - 30, '+' + gain + ' 金币', '#ffd54f');
                 this._toast('出售 +' + gain + ' 金币');
               }
             }
@@ -549,7 +584,7 @@ class Main {
                 if (r.coins) txt += ' +' + r.coins + '金币';
                 if (r.energy) txt += ' +' + r.energy + '能量';
                 if (r.master) txt += ' · 全图鉴限定皮肤';
-                this.renderer.addFloatText(this.canvas.width / 2, this.canvas.height * 0.4, txt, '#ffd54f');
+                this.renderer.addFloatText(this.cw / 2, this.ch * 0.4, txt, '#ffd54f');
                 this._toast('图鉴奖励：' + txt);
               } else { this._toast('暂无可领阶段'); }
             }
@@ -561,7 +596,7 @@ class Main {
                 if (reward.type === 'coins') txt = '+' + reward.value + ' 金币';
                 else if (reward.type === 'energy') txt = '+' + reward.value + ' 能量';
                 else if (reward.type === 'top') txt = reward.value + '!';
-                this.renderer.addFloatText(this.canvas.width / 2, this.canvas.height * 0.42, txt, '#ffd54f');
+                this.renderer.addFloatText(this.cw / 2, this.ch * 0.42, txt, '#ffd54f');
                 this._toast('宝箱开启：' + txt);
               } else { this._toast('活跃度未满或今日已领取'); }
             }
@@ -582,7 +617,7 @@ class Main {
                 if (reward.coins) txt += '+' + reward.coins + '金币 ';
                 if (reward.energy) txt += '+' + reward.energy + '能量';
                 if (reward.beyblade) txt += '传说陀螺!';
-                this.renderer.addFloatText(this.canvas.width / 2, this.canvas.height * 0.42, txt.trim(), '#ffd54f');
+                this.renderer.addFloatText(this.cw / 2, this.ch * 0.42, txt.trim(), '#ffd54f');
                 this._toast('签到成功：' + txt.trim());
                 // 签到成功后自动关闭签到面板，回到主界面后光晕不再闪
                 this.game.signOpen = false;
@@ -590,7 +625,7 @@ class Main {
             } else if (a === 'refill') {
               if (this.game.freeRefill()) {
                 this.audio.play('click');
-                this.renderer.addFloatText(this.canvas.width - 70, 30 + this.safeTop, '能量回满', '#00e676');
+                this.renderer.addFloatText(this.cw - 70, 30 + this.safeTop, '能量回满', '#00e676');
                 this._toast('能量已回满');
               } else { this._toast('今日回满已用完'); }
             } else if (a === 'adenergy') {
@@ -600,7 +635,7 @@ class Main {
               Rewarded.show({
                 onReward: () => {
                   this.game.watchAdEnergy(); this.audio.play('click');
-                  this.renderer.addFloatText(this.canvas.width - 70, 30 + this.safeTop, '能量 +60', '#00e676');
+                  this.renderer.addFloatText(this.cw - 70, 30 + this.safeTop, '能量 +60', '#00e676');
                   this._toast('看广告能量 +60');
                 },
                 onFail: () => { this._adBusy = false; this._toast('广告暂不可用'); },
@@ -786,7 +821,7 @@ class Main {
     }
     if (this.game.doShare()) {
       this.audio.play('click');
-      this.renderer.addFloatText(this.canvas.width - 70, 30 + this.safeTop, '能量 +20', '#00e676');
+      this.renderer.addFloatText(this.cw - 70, 30 + this.safeTop, '能量 +20', '#00e676');
       this._toast('分享成功，能量 +20');
     } else {
       this._toast('今日分享奖励已用完');
@@ -841,7 +876,7 @@ class Main {
         // draw() 内部先 +1 再判保底（pityLegend>=30 / pityEpic>=10），故 draw 前 >=29 / >=9 即本次必触发
         const isPityLegend = pityBefore.legend >= 29;
         const isPityEpic = pityBefore.epic >= 9;
-        const fxX = this.canvas.width / 2, fxY = this.canvas.height * 0.42;
+        const fxX = this.cw / 2, fxY = this.ch * 0.42;
         if (isPityLegend) {
           this.renderer.addRing(fxX, fxY, '#ffd54f');
           this.renderer.addParticles(fxX, fxY, '#ffd54f', 40);
@@ -910,7 +945,7 @@ class Main {
       const instantiate = () => {
         try {
           const SpintopBattle = require('../battle/spintop.js').SpintopBattle;
-          const bb = new SpintopBattle(this.game, this.canvas.width, this.canvas.height);
+          const bb = new SpintopBattle(this.game, this.cw, this.ch);
           bb.audio = this.audio;
           bb.safeTop = this.safeTop;
           bb.safeBottom = this.safeBottom;
@@ -1149,7 +1184,7 @@ class Main {
       const r = this.game._levelUpReward;
       this.game._levelUpReward = null;
       this._toast('升级！Lv.' + r.level + ' · ' + r.bonus);
-      const ux = this.canvas.width / 2, uy = this.canvas.height * 0.42;
+      const ux = this.cw / 2, uy = this.ch * 0.42;
       this.renderer.addParticles(ux, uy, '#ffd54f', 32);
       this.renderer.addParticles(ux, uy, '#ffffff', 12);
       this.renderer.addRing(ux, uy, '#ffd54f');
@@ -1167,8 +1202,8 @@ class Main {
         this.game.battle.update(dt);
         if (this.game.battle.phase === 'result') {
           if (!this._resultPlayed) {
-            const cx = this.canvas.width / 2;
-            const cy = this.canvas.height * 0.4;
+            const cx = this.cw / 2;
+            const cy = this.ch * 0.4;
             if (this.game.battle.result === 'win') {
               this.renderer.addFloatText(cx, cy + 130, '+' + this.game.battle.reward, '#ffd54f');
               if (this.game.battle.counter) {

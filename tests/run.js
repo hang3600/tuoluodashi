@@ -26,6 +26,8 @@ const SUITES = [
   { file: 'smoke_layout_sig.js', desc: 'P1-7 布局签名浮点 energy → 每帧全量 reflow' },
   { file: 'smoke_perf_p18.js', desc: 'P1-8 其他性能项（光束/装饰缓存、measureText、拖尾池、展开运算符）' },
   { file: 'smoke_analytics.js', desc: 'P1 数据盲区：零成本埋点（boot/battle_start/first_battle_done 去重）' },
+  { file: 'smoke_cross_ios_android.js', desc: '跨平台 iOS/Android 一致性门禁（benchmarkLevel 补偿/阴影放开/DPR 解耦）' },
+  { file: 'smoke_audio_cross.js', desc: '跨平台音频 #4/#5/#6（软件音量 parity/Android 打断自愈/旋转风声防爆音）' },
 ];
 
 function runOne(file) {

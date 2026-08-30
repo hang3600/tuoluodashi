@@ -66,6 +66,9 @@ class InputHandler {
       this._audioUnlocked = true;
       try { if (typeof Sfx !== 'undefined') Sfx.unlock(); } catch (e) {}
     }
+    // #5 跨平台自愈：Android 无 onAudioInterruption 事件，来电/其他 App 抢音频且未进后台时
+    // AudioContext 会被挂起且 onShow 不触发；每次触摸都尝试恢复，确保下一次交互即自愈。
+    try { if (typeof Sfx !== 'undefined' && Sfx.ensureRunning) Sfx.ensureRunning(); } catch (e) {}
     for (const t of e.changedTouches) {
       const p = this._normalize(t);
       const item = { id: p.id, x: p.x, y: p.y, startX: p.x, startY: p.y, moved: false, longPressed: false };
