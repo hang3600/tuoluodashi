@@ -137,6 +137,7 @@ class GameState {
     this.interAdDate = '';        // 插屏广告每日计数日期 key
     this.interAdCount = 0;        // 当日已弹插屏次数（每日上限见 DRAW_INTERSTITIAL_DAILY_CAP）
     this.interAdBroken = false;   // 插屏不可用降级标志（运行时，连续不可用触发，成功展示/次日清除）
+    this.drawAdIntroduced = false;   // 抽卡激励弹窗仅给新用户首次展示一次，之后永不弹（避免每次抽卡都打断）
 
     this.signDate = '';
     this.signDay = 0;
@@ -1038,6 +1039,7 @@ class GameState {
         drawsSinceAd: this.drawsSinceAd,
         interAdDate: this.interAdDate,
         interAdCount: this.interAdCount,
+        drawAdIntroduced: this.drawAdIntroduced ? 1 : 0,
         resultDoubleDate: this.resultDoubleDate,
         resultDoubleCount: this.resultDoubleCount,
         interAdBroken: this.interAdBroken,
@@ -1081,7 +1083,7 @@ class GameState {
       this.filterTier, this.shareDate, this.shareCount, this.refillDate, this.refillCount,
       this.winStreak, this.pityEpic, this.pityLegend, this.tutorialDone ? 1 : 0, this.tutorialStep,       this.adEnergyDate,
       this.obDone ? 1 : 0, this.obTries,
-      this.adEnergyCount, this.drawsSinceAd, this.interAdDate, this.interAdCount, this.interAdBroken ? 1 : 0,
+      this.adEnergyCount, this.drawsSinceAd, this.interAdDate, this.interAdCount, this.interAdBroken ? 1 : 0, this.drawAdIntroduced ? 1 : 0,
       this.resultDoubleDate, this.resultDoubleCount,
       this.signDate, this.signDay, this.signClaimed ? 1 : 0,
       this.signStreak, this.signMakeupDate, this.lastSeen, this.offlineRewardDate,
@@ -1183,6 +1185,7 @@ class GameState {
       this.resultDoubleDate = typeof data.resultDoubleDate === 'string' ? data.resultDoubleDate : '';
       this.resultDoubleCount = Math.max(0, Number(data.resultDoubleCount) || 0);
       this.interAdBroken = !!data.interAdBroken;
+      this.drawAdIntroduced = !!data.drawAdIntroduced;
       this.signDate = typeof data.signDate === 'string' ? data.signDate : '';
       this.signDay = Math.max(0, Math.min(14, Number(data.signDay) || 0));
       this.signClaimed = !!data.signClaimed;
@@ -1297,6 +1300,7 @@ class GameState {
       if (typeof migrated.interAdDate !== 'string') migrated.interAdDate = '';
       if (typeof migrated.interAdCount !== 'number') migrated.interAdCount = 0;
       if (typeof migrated.interAdBroken !== 'boolean') migrated.interAdBroken = false;
+      if (typeof migrated.drawAdIntroduced !== 'boolean') migrated.drawAdIntroduced = false;
       // v2新增：合成台三槽
       if (!Array.isArray(migrated.platform)) migrated.platform = [null, null, null];
       // v1的tierIndex范围是0-3（4品质），v2是0-4（5品质），需要映射
