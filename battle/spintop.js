@@ -727,6 +727,7 @@ class SpintopBattle {
       if (cm.indexOf(this._critCount) >= 0) {
         this.screenShake = Math.max(this.screenShake, 6);
         this._addFloatingText(top.x, top.y - 150, '第 ' + this._critCount + ' 次暴击！', '#FFD700', true, 1.6);
+        if (typeof wx !== 'undefined' && wx.vibrateShort) { try { wx.vibrateShort({ type: 'light' }); } catch (e) {} }   // ②2-1 里程碑轻震
       }
     }
     this._createParticles(top.x, top.y, fEff * (isCrit ? 5 : 3));

@@ -17,7 +17,7 @@ const UI = {
     mask:      'rgba(35,18,70,0.62)'       // 面板遮罩
   },
   radius: { sm: 8, md: 14, lg: 20 },
-  motion: { pressScale: 0.94, pressDur: 0.18, panelDur: 0.26, panelOvershoot: 1.03 }
+  motion: { pressScale: 0.94, pressDur: 0.18, panelDur: 0.26, panelOvershoot: 1.03, floatRise: 26, floatLife: 1.0, hapticWin: 'medium', hapticIn: 'light' }
 };
 
 module.exports = { UI, APPLE_FONT: UI.family };

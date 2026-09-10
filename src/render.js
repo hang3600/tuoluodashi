@@ -2989,7 +2989,7 @@ class Renderer {
     const ctx = this.ctx;
     for (let i = this.floatTexts.length - 1; i >= 0; i--) {
       const f = this.floatTexts[i];
-      if (!this._debugFreezeFx) { f.life -= dt; f.y -= dt * 26; }
+      if (!this._debugFreezeFx) { f.life -= dt; f.y -= dt * UI.motion.floatRise; }   // ②2-1 飘字节奏统一
       if (f.life <= 0) { this.floatTexts.splice(i, 1); continue; }
       ctx.globalAlpha = Math.max(0, f.life / f.maxLife);
       ctx.fillStyle = f.color;

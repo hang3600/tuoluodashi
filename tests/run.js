@@ -47,6 +47,7 @@ const SUITES = [
   { file: 'smoke_ultimate.js', desc: '#8 怒气必杀：怒气积累(命中/撞击/打偏不攒/封顶) + 满怒必杀按钮 + 释放演出+得分爆发 + HUD 怒气条' },
   { file: 'smoke_level_boss.js', desc: '#9 关卡/BOSS 化：每5关BOSS + 二阶段狂暴(分数过半×1.25) + 敌血条=目标分映射 + 第N关/对手名 HUD' },
   { file: 'smoke_coop.js', desc: '双人合作守关：同屏交替传机·只记战绩不发资源 + BOSS强化 + passPhone + 纯邀约分享(非诱导) + 灰度门控' },
+  { file: 'smoke_micro_2_1.js', desc: '②-2-1 细节手感：触感脉冲(胜利/翻倍/里程碑) + 飘字节奏统一' },
   { file: 'smoke_ui_tokens.js', desc: '①一致性收口·设计令牌：UI令牌 + render迁字体/色彩/按钮手感' },
   { file: 'smoke_quality_evolution.js', desc: '皮肤/外观：大师限定盘面持久化+渲染(终局奖品) + 合成晋级闭环' },
   { file: 'smoke_quality_polish.js', desc: '②质感精修：盘面高光扫过/战斗氛围随局变化/统一动效，纯装饰受性能分档约束' },

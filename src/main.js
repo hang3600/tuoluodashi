@@ -13,6 +13,7 @@ const { Sfx } = require('./audio');
 const { Rewarded } = require('./ads');
 const { Subscribe } = require('./subscribe');
 const { CONFIG } = require('./config');
+const { UI } = require('./ui');   // ②2-1 触感/飘字节奏令牌
 const { reportBoot, reportBattleDefeat } = require('./analytics'); // 零成本埋点：冷启动 / 战败漏斗（P1 数据盲区 / U10）
 // error-handler 用防御式加载：若开发者工具未将其扫进模块图（常见于外部工具新增文件后未重编译），
 // 直接用空兜底，保证启动不崩；重新编译后自动加载真实实现。
@@ -1217,6 +1218,12 @@ class Main {
 
   // 双人合作守关入口：复用 _quickBattle 的门禁（有陀螺 / 20 能量门票），带 coop 标记开合作关。
   // 结算只记战绩不发资源（见 spintop _settle coop 闸门）。
+  // ②2-1 触感脉冲：胜利/翻倍轻震（守护 wx 缺失即跳过；低档机可抑制）
+  _haptic(kind) {
+    if (typeof wx === 'undefined' || !wx.vibrateShort) return;
+    try { wx.vibrateShort({ type: kind === 'win' ? UI.motion.hapticWin : UI.motion.hapticIn }); } catch (e) {}
+  }
+
   _startCoop() {
     if (!(CONFIG.coop && CONFIG.coop.enabled)) return;
     const bb = this.game.selectBattleBeyblade();
@@ -1272,6 +1279,7 @@ class Main {
       onReward: () => {
         this._adBusy = false;
         this._resultDoubled = true;
+        this._haptic('win');   // ②2-1 结算翻倍轻震
         if (this.game && typeof this.game.markResultDouble === 'function') this.game.markResultDouble();
         const extra = (b && b.reward) || 0;
         if (this.game) this.game.coins += extra;
@@ -1534,7 +1542,8 @@ class Main {
           if (!this._resultPlayed) {
             const cx = this.cw / 2;
             const cy = this.ch * 0.4;
-            if (this.game.battle.result === 'win') {
+              if (this.game.battle.result === 'win') {
+              this._haptic('win');   // ②2-1 胜利轻震
               this.renderer.addFloatText(cx, cy + 130, '+' + this.game.battle.reward, '#ffd54f');
               if (this.game.battle.counter) {
                 this.audio.play('crit');
