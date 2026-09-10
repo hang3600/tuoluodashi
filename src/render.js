@@ -10,6 +10,7 @@
 const { drawBeyblade, TIERS, Beyblade } = require('./beyblade');
 const { isPointInRect, formatNumber, drawVectorIcon, prepSrc: _prepSrc, loadOne: _loadOne, downscaleToCap } = require('./utils');
 const { CONFIG } = require('./config');
+const { UI, APPLE_FONT } = require('./ui');   // ①设计令牌（字体/色彩/圆角/手感一致）
 const { SIGN_REWARDS } = require('./game');
 
 // 图鉴筛选条短名映射（仅当按钮宽度不足放全名时取首字）。提升为模块级常量，避免每帧重建对象。
@@ -26,7 +27,7 @@ const _HOME_B64 = (function () { try { return require('./homebg'); } catch (e) {
 // 图鉴独立背景：暗调陈列星图，与主页「宇宙星海战场」区分，且更静更暗以承载 25 只陀螺密集网格。
 const _CODEX_B64 = (function () { try { return require('./codexbg'); } catch (e) { return null; } })();
 
-const APPLE_FONT = '-apple-system, BlinkMacSystemFont, "SF Pro Text", "SF Pro Display", "PingFang SC", "Helvetica Neue", sans-serif';
+// APPLE_FONT 统一来自 ./ui（见顶部 require('./ui')），消除与 spintop 的双份字面量
 
 // 背景图解码封顶（U10-C）：LOW 档降到 540p 省解码内存，其余维持 720p。
 // 纯函数，便于无头测试。
@@ -1917,17 +1918,17 @@ class Renderer {
     const label = (r) => {
       ctx.save();
       const ic = ICONS[r.action];
-      ctx.fillStyle = '#ffffff';
+      ctx.fillStyle = UI.color.text;
       ctx.textAlign = 'center';
       ctx.textBaseline = 'middle';
       ctx.shadowColor = 'rgba(0,0,0,0.5)';
       ctx.shadowBlur = 3;
       if (ic) {
         this._drawPngIcon(ic, r.x + r.w / 2, r.y + r.h * 0.36, 18 * (ICON_SCALE[r.action] || 1));
-        ctx.font = 'bold 16px ' + APPLE_FONT;
+        ctx.font = this._tl(UI.font.head, true);
         ctx.fillText(TEXTS[r.action], r.x + r.w / 2, r.y + r.h * 0.72);
       } else {
-        ctx.font = 'bold 17px ' + APPLE_FONT;
+        ctx.font = this._tl(UI.font.title, true);
         ctx.fillText(TEXTS[r.action], r.x + r.w / 2, r.y + r.h / 2);
       }
       ctx.shadowBlur = 0;
@@ -2600,6 +2601,9 @@ class Renderer {
   // =====================================================
   // 控件渲染 · 按钮 / 图标 / Tab
   // =====================================================
+  // ①统一文本助手：px 字号 → 字体串（可加粗），对齐设计令牌字号台阶
+  _tl(px, weight) { return (weight ? 'bold ' : '') + px + 'px ' + APPLE_FONT; }
+
   drawButton(x, y, w, h, text, color) {
     const ctx = this.ctx;
     const radius = Math.min(18, h / 2 - 1);
@@ -2611,7 +2615,8 @@ class Renderer {
 
     ctx.save();
     ctx.translate(x + w / 2, y + h / 2);
-    ctx.scale(1 - pressT * 0.06, 1 - pressT * 0.06);
+    const _ps = 1 - pressT * (1 - UI.motion.pressScale);   // ①按压手感统一（UI.motion.pressScale）
+    ctx.scale(_ps, _ps);
     ctx.translate(-(x + w / 2), -(y + h / 2));
 
     ctx.shadowColor = 'rgba(0,0,0,0.30)';
