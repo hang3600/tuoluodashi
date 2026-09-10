@@ -266,6 +266,7 @@ class SpintopBattle {
     this._bgSprite = null;         // 对战背景合并位图（arena 渐变 + 星空，每帧 1 次全屏 drawImage）
     this._bgSpriteW = 0;
     this._bgSpriteH = 0;
+    this._bgTintKey = '';          // 背景氛围色 key（阶段/BOSS/节日），变化时触发重烘焙
     this._arenaDecorSprite = null; // 战斗盘静态 8 层装饰离屏位图（按 top.color+尺寸缓存，每帧 1 次 drawImage）
     this._arenaDecorKey = '';
     this._sceneSprite = null;      // 静态场景合并位图（_bgSprite + _arenaDecorSprite 合成一张，每帧 1 次全屏 drawImage 替代 2 次）
@@ -709,7 +710,7 @@ class SpintopBattle {
     const flashA = Math.min(0.5, isCrit ? 0.5 : (0.18 + fEff * 0.06));
     this.hitFlashes.push({ x: top.x, y: top.y, r: flashR, alpha: flashA, warm: true, t: 0 });
     // #7 打击感·拖尾辉光：暴击满辉、重击半辉，update 衰减（驱动 _drawTrail 加粗发光）
-    this._trailGlow = isCrit ? 1 : (fEff > top.maxSpeed * 0.7 ? 0.5 : this._trailGlow);
+    this._trailGlow = Math.min(1, (isCrit ? 1 : (fEff > top.maxSpeed * 0.7 ? 0.5 : this._trailGlow)) + (!this._fxLow && Math.abs(this.top.angularVelocity) >= top.maxSpeed * 0.8 ? 0.08 : 0));
 
     // 命中闪光（陀螺位置爆发光效）
     this.shockwaves.push({ x: top.x, y: top.y, radius: top.radius * 1.5, maxRadius: top.radius * (isCrit ? 6 : 4), alpha: isCrit ? 1 : 0.8, color: isCrit ? '#FFD700' : top.color });
@@ -1533,7 +1534,8 @@ class SpintopBattle {
     }
     // 背景合并层：arena 渐变 + 星空烘焙成一张位图，每帧只 1 次全屏 drawImage
     // （替代 fillRect 全屏渐变 + _starsBg 全屏 blit 两层全屏操作，低端机软渲染最大头）
-    if (!this._bgSprite || this._bgSpriteW !== w || this._bgSpriteH !== h) {
+    const tint = this._ambientTint();
+    if (!this._bgSprite || this._bgSpriteW !== w || this._bgSpriteH !== h || this._bgTintKey !== tint.key) {
       let cv = null;
       try {
         if (typeof wx !== 'undefined' && wx.createOffscreenCanvas) {
@@ -1556,7 +1558,9 @@ class SpintopBattle {
             c.fill();
           }
           c.globalAlpha = 1;
+          if (!this._fxLow) { c.fillStyle = hexToRgba(tint.color, tint.alpha); c.fillRect(0, 0, w, h); }   // ②B 氛围叠层（LOW 档跳过）
           this._bgSprite = cv; this._bgSpriteW = w; this._bgSpriteH = h;
+          this._bgTintKey = tint.key;
         }
       }
     }
@@ -1946,6 +1950,18 @@ class SpintopBattle {
    * 渐变坐标/色标仅在 top 颜色、半径改变时变化（一局内固定），按 key 复用即可。
    * 注意小游戏 canvas 渐变不支持透明背景缓存，直接缓存渐变对象（非离屏位图）。
    */
+  // ②B：战斗氛围色（克制的背景着色，烘焙进背景位图、非逐帧）。普通关冷→中性→暖；BOSS 偏红；节日微调。
+  _ambientTint() {
+    let color = '#2b5f9e', alpha = 0.12;        // 冷蓝（前期 1-4）
+    const st = this.runStage || 1;
+    if (st >= 10) { color = '#7a4a2a'; alpha = 0.14; }       // 暖橙（后期 10+）
+    else if (st >= 5) { color = '#5b6a8a'; alpha = 0.12; }   // 中性（中期 5-9）
+    if (this.isBoss) { color = '#6e1a1a'; alpha = 0.18; }    // BOSS 偏红压深
+    const act = (this.game && typeof this.game.activityInfo === 'function') ? this.game.activityInfo() : {};
+    if (act && act.festivalName) { alpha = Math.min(0.22, alpha + 0.04); color = this._lightenColor(color, 0.04); }
+    return { key: (this.isBoss ? 'B' : '') + (st >= 10 ? 2 : (st >= 5 ? 1 : 0)) + (act && act.festivalName ? 'F' : ''), color: color, alpha: alpha };
+  }
+
   _radial(ctx, key, x0, y0, r0, x1, y1, r1, stops) {
     let g = this._topGrads[key];
     if (!g) {
@@ -2286,6 +2302,20 @@ class SpintopBattle {
     return this._bakeTopSprite(this.enemy, (this.enemyBb && this.enemyBb.tierIndex) || 0, (this.enemyBb && this.enemyBb.level) || 1, this._enemyCache);
   }
 
+  // ②A1：随转克制高光扫过。因主流程已 rotate(top.rotation)，固定盘缘柔光随盘自转；LOW 档/低俗关闭。
+  _drawTopSweep(ctx, r, speed) {
+    if (this._fxLow || speed <= 2) return;
+    const hr = Math.max(3, r * 0.30);
+    const hx = r * 0.55, hy = -r * 0.28;
+    ctx.save();
+    ctx.globalCompositeOperation = 'screen';   // 提亮；不支持退化为普通叠加，无害
+    ctx.globalAlpha = TOP_SWEEP_ALPHA;
+    ctx.beginPath(); ctx.arc(hx, hy, hr, 0, Math.PI * 2);
+    ctx.fillStyle = this._radial(ctx, 'sweep|' + Math.round(hr * 10) + '|' + this.top.trailColor, hx, hy, 0, hx, hy, hr, [[0, hexToRgba(this.top.trailColor, 0.55)], [1, 'rgba(0,0,0,0)']]);
+    ctx.fill();
+    ctx.restore();
+  }
+
   _drawTop(ctx) {
     const r = this.top.radius;
     const speed = Math.abs(this.top.angularVelocity);
@@ -2296,6 +2326,7 @@ class SpintopBattle {
       ctx.save();
       if (wobble !== 0) { ctx.rotate(wobble); ctx.translate(0, wobble * 5); }
       ctx.drawImage(sprite, -r, -r, r * 2, r * 2);
+      this._drawTopSweep(ctx, r, speed);
       ctx.restore();
       return;
     }
@@ -3449,6 +3480,7 @@ class SpintopBattle {
 
 // 批次E·连战 run buff 池（每胜随机抽 3 张，可叠层累积）
 const COOP_BOSS_MULT = 2;   // 双人合作关 BOSS 目标分放大倍率
+const TOP_SWEEP_ALPHA = 0.32;   // 盘缘克制高光扫过的透明度（②质感，可调弱/关）
 
 const RUN_BUFFS = [
   { id: 'torque', label: '速', color: '#ffb300', name: '转速强化', desc: '陀螺最大转速 +12%', icon: 'spin' },
@@ -3464,6 +3496,7 @@ const RUN_BUFFS = [
 module.exports = {
   SpintopBattle, POWERUPS, RUN_BUFFS, LOSE_ENERGY_PENALTY,
   COOP_BOSS_MULT,
+  TOP_SWEEP_ALPHA,
   WHIP_DIST_FULL, WHIP_DIST_MIN, WHIP_DIST_MAX, IMPULSE_CAP, SHAKE_MAX, FORCE_CAP_MULT,
   HITSTOP_COLLISION, HITSTOP_CRIT, CRIT_MULT, TARGET_REF_MULT,
   HITSTOP_MIN_IMPACT, HITSTOP_COLLISION_CD, PARTICLE_ALPHA_STEPS
