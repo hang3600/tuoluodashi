@@ -48,6 +48,7 @@ const SUITES = [
   { file: 'smoke_level_boss.js', desc: '#9 关卡/BOSS 化：每5关BOSS + 二阶段狂暴(分数过半×1.25) + 敌血条=目标分映射 + 第N关/对手名 HUD' },
   { file: 'smoke_coop.js', desc: '双人合作守关：同屏交替传机·只记战绩不发资源 + BOSS强化 + passPhone + 纯邀约分享(非诱导) + 灰度门控' },
   { file: 'smoke_quality_polish.js', desc: '②质感精修：盘面高光扫过/战斗氛围随局变化/统一动效，纯装饰受性能分档约束' },
+  { file: 'smoke_stage_preview.js', desc: '拉单局时长：暴击次数里程碑飘字 + 结算→下一关目标预览' },
   { file: 'smoke_result_double.js', desc: '胜利结算翻倍：赢一局看广告金币×2 + 每日上限/同局一次/无广告位门控' },
   { file: 'smoke_ad_freq.js', desc: '广告频控：被动激励位一局≤2次且间隔≥3分钟，主动位(能量)不受限' },
   { file: 'smoke_battle_frame.js', desc: '对战页 HUD 框（电影感游戏界面）：烘焙+缓存 + 低能量危机暗角不崩' },

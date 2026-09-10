@@ -529,6 +529,7 @@ class SpintopBattle {
     this.isWhipping = false;
     this.whipCount = 0;
     this._burstCount = 0;
+    this._critCount = 0;      // 暴击次数里程碑计数（每局重置）
     this._rhythmCount = 0;
     this.lastWhipStyle = 'rhythm';
     this.lastWhipTime = 0;
@@ -717,6 +718,13 @@ class SpintopBattle {
     if (isCrit) {
       // 暴击：双重冲击波
       this.shockwaves.push({ x: top.x, y: top.y, radius: top.radius * 0.8, maxRadius: top.radius * 5, alpha: 0.6, color: '#FF6B6B' });
+      // A·暴击次数里程碑：第 5/10/20 次暴击 → 金色飘字 + 轻震屏（拉长局内正反馈）
+      this._critCount++;
+      const cm = [5, 10, 20];
+      if (cm.indexOf(this._critCount) >= 0) {
+        this.screenShake = Math.max(this.screenShake, 6);
+        this._addFloatingText(top.x, top.y - 150, '第 ' + this._critCount + ' 次暴击！', '#FFD700', true, 1.6);
+      }
     }
     this._createParticles(top.x, top.y, fEff * (isCrit ? 5 : 3));
     if (isCrit) {
@@ -3429,6 +3437,22 @@ class SpintopBattle {
       ctx.restore();
       buttons.push({ x: dpX, y: dpY, w: dpW, h: dpH, action: 'battle_result_double' });
       cursor += 12;
+    }
+    // ---- B·下一关目标预览：给"再打一关"的期待（纯文案、不进按钮、不做精确目标避免误导）----
+    if (isWin && !this.coop) {
+      const nextStage = this.runStage + 1;
+      const _nextIsBoss = (nextStage % 5 === 0);
+      if (cursor + 40 < h - (this.safeBottom || 24) - 40) {   // 防矮屏溢出才画
+        cursor += 2;
+        const nvY = cursor; cursor += 26;
+        ctx.save();
+        ctx.globalAlpha = 0.78;
+        ctx.fillStyle = '#ffe082'; ctx.font = 'bold 14px sans-serif';
+        ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+        ctx.fillText('下一关 · 第 ' + nextStage + ' 关' + (_nextIsBoss ? ' ⚔ BOSS' : '') + '  难度↑ 目标↑', cx, nvY);
+        ctx.restore();
+        cursor += 8;
+      }
     }
     // ---- 按钮（CTA：外发光 + 入场 spring）----
     cursor += SPACER;
