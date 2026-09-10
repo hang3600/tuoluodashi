@@ -678,6 +678,9 @@ class SpintopBattle {
 
     this.combo++;
     this.whipCount++;
+    if (this.whipCount >= 2 && this.game && !this.game.battleTutShown) {
+      this.game.battleTutShown = true;   // 新手提示仅首场前两鞭展示一次，之后永不
+    }
     this.comboTimer = this._comboWindow || 1.5;
     if (this.combo > this.maxCombo) this.maxCombo = this.combo;
 
@@ -833,7 +836,7 @@ class SpintopBattle {
     const gyroMinY = cy - topR - 56;
     const gyroMaxY = cy + topR + 56;
 
-    const tutorialActive = this.whipCount < 2;
+    const tutorialActive = this.whipCount < 2 && !(this.game && this.game.battleTutShown);
     const tutX1 = W / 2 - 170, tutX2 = W / 2 + 170;
     const tutY1 = H / 2 + 60, tutY2 = H / 2 + 180;
 
@@ -1804,7 +1807,7 @@ class SpintopBattle {
       }
     }
     if (this.phase === 'playing') this._drawHudFrame(ctx);
-    if (this.phase === 'playing' && this.whipCount < 2) this._drawTutorialHint(ctx);
+    if (this.phase === 'playing' && this.whipCount < 2 && !(this.game && this.game.battleTutShown)) this._drawTutorialHint(ctx);
 
     ctx.restore();
 
