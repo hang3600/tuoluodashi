@@ -1129,10 +1129,7 @@ class Main {
     const unitMap = { draw3: CONFIG.drawAdUnitId3, draw6: CONFIG.drawAdUnitId6, draw9: CONFIG.drawAdUnitId9, rand2: CONFIG.drawAdUnitIdRand };
     const unit = unitMap[adKey];
     if (!unit) return;
-    if (this.game.drawAdIntroduced) return;   // 抽卡激励弹窗只给新用户首次一次，之后永不弹
-    if (!this._adFreqGate()) return;   // 被动自动插播：频控不过则静默跳过（不打扰）；未标记可后续补弹
-    this.game.drawAdIntroduced = true; // 真正展示一次，记档
-    if (typeof this.game.save === 'function') { try { this.game.save(); } catch (e) {} }
+    if (!this._adFreqGate()) return;   // 被动自动插播：频控不过则静默跳过（不打扰）
     Rewarded.show({
       adUnitId: unit,
       onReward: () => {}, // 看完：纯曝光，不额外发奖（等同原隐藏插屏）
