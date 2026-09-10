@@ -21,6 +21,54 @@
       {
         "value": "tests",
         "type": "folder"
+      },
+      {
+        "value": "src/imgb64.js",
+        "type": "file"
+      },
+      {
+        "value": "src/homebg.js",
+        "type": "file"
+      },
+      {
+        "value": "src/codexbg.js",
+        "type": "file"
+      },
+      {
+        "value": "battle/arenabg.js",
+        "type": "file"
+      },
+      {
+        "value": ".trash_deadcode",
+        "type": "folder"
+      },
+      {
+        "value": "_bak_woodlv_before_replace",
+        "type": "folder"
+      },
+      {
+        "value": "_bak_firelv_before_replace",
+        "type": "folder"
+      },
+      {
+        "value": "_bak_waterlv_before_replace",
+        "type": "folder"
+      },
+      {
+        "value": "整体审计-游戏化改造方案-2026-08-31.md",
+        "type": "file"
+      },
+      {
+        "value": "跨平台审计报告-2026-08-30.md",
+        "type": "file"
+      },
+      {
+        "value": "跨平台审计报告-2026-09-02.md",
+        "type": "file"
+      },
+      {
+        "value": "自检报告-2026-08-30.md",
+        "type": "file"
       }
     ],
     "include": []

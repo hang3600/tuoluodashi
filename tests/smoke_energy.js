@@ -59,7 +59,7 @@ console.log('\n【P0-3-b】胜利不扣惩罚（负向用例）');
 console.log('\n【P0-3-c】结算页文案由常量生成，源码无硬编码数字');
 {
   const src = fs.readFileSync(path.join(__dirname, '..', 'battle', 'spintop.js'), 'utf8');
-  ok('文案由 LOSE_ENERGY_PENALTY 拼接', /'能量 -'\s*\+\s*LOSE_ENERGY_PENALTY/.test(src));
+  ok('扣能文案由 LOSE_ENERGY_PENALTY 拼接', /'−'\s*\+\s*LOSE_ENERGY_PENALTY/.test(src));
   const hardcoded = src.match(/'能量\s*-\d+'/g) || [];
   ok('无硬编码的「能量 -N」字面量', hardcoded.length === 0, hardcoded.join(', '));
   const literalDeduct = src.match(/this\.game\.energy - \d+/g) || [];

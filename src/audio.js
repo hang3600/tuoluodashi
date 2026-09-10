@@ -247,6 +247,11 @@ const Sfx = {
       merge: { freq: 520, slideTo: 1040, type: 'sawtooth', dur: 0.22, gain: 0.13 },
       // 鞭响：短促噪声爆音 + 高频瞬态（模拟鞭子"啪"）——健身陀螺抽打
       clash: { freq: 1800, slideTo: 900, type: 'square', dur: 0.09, gain: 0.32, noise: true },
+      // #7 打击感·音效分层：轻击（短促高频脆响）/ 重击（低频闷砸）/ 必杀（上扫轰鸣）/ 出界（下扫坠落）
+      clash_light:  { freq: 1500, slideTo: 900, type: 'square', dur: 0.06, gain: 0.20, noise: true },
+      clash_heavy:  { freq: 240, slideTo: 110, type: 'sawtooth', dur: 0.16, gain: 0.30 },
+      ultimate:     { freq: 200, slideTo: 1700, type: 'sawtooth', dur: 0.5, gain: 0.24 },
+      ringout:      { freq: 320, slideTo: 60, type: 'sawtooth', dur: 0.5, gain: 0.2 },
       win:   { freq: 660, slideTo: 1320, type: 'triangle', dur: 0.35, gain: 0.15 },
       lose:  { freq: 500, slideTo: 180, type: 'sawtooth', dur: 0.4, gain: 0.14 },
       crit:  { freq: 880, slideTo: 1760, type: 'square', dur: 0.28, gain: 0.16 },

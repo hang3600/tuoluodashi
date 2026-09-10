@@ -46,6 +46,17 @@ class ErrorHandler {
     this._onErrorCallback = options.onError || null;
     this._reportUrl = options.reportUrl || null;
 
+    // 运维中心崩溃上报配置（零后端，详见 config.js 的 crashReport）
+    //   gameLog : 小游戏实时日志（base lib 3.7.4+），写全量 errorLog 供按 openid 查
+    //   eventId : 崩溃计数事件 ID，wx.reportEvent(id,{crash_count:1}) 做计数/告警。
+    //             注意：wx.reportMonitor 自基础库 2.31.1 起已「停止维护」，
+    //             本项目基础库 3.17.1 必须用 wx.reportEvent（事件在 运维中心/WE分析
+    //             → 数据管理 → 上报管理 新建）。旧基础库无 reportEvent 时回退 reportMonitor。
+    const report = options.report || {};
+    this._reportGameLog = (report.gameLog !== false);   // 默认开启
+    this._eventId = (typeof report.eventId === 'string') ? report.eventId : '';
+    this._logManager = null;   // 懒初始化，避免 devtools/低版本 base lib 缺失时崩溃
+
     console.log('[ErrorHandler] 初始化全局错误捕获...');
 
     // 1. 微信小游戏全局错误捕获
@@ -149,7 +160,10 @@ class ErrorHandler {
         }
       }
 
-      // 远程上报（可选）
+      // 远程上报（可选，运维中心通道）
+      this._reportCrash(errorLog);
+
+      // 远程上报（可选，自定义 URL，极少用）
       if (this._reportUrl) {
         this._reportError(errorLog);
       }
@@ -345,6 +359,91 @@ class ErrorHandler {
       }
     } catch (e) {
       console.warn('[ErrorHandler] 远程上报异常:', e.message);
+    }
+  }
+
+  /**
+   * 运维中心崩溃上报（零后端）
+   * - GameLogManager（小游戏实时日志）：写全量 errorLog，后台按 openid 可查，定位真机崩溃
+   * - 计数告警：wx.reportEvent(eventId, {crash_count:1, source})（基础库 2.31.1 起
+   *   reportMonitor 已停止维护，本项目 3.17.1 用 reportEvent；旧 Lib 无 reportEvent 时回退 reportMonitor）
+   * 守卫：wx 缺失 / API 缺失 / devtools 环境 → 静默跳过，绝不抛错、绝不污染生产监控。
+   * @private
+   */
+  _reportCrash(errorLog) {
+    try {
+      // devtools 下不写运维中心：避免本机调试把生产崩溃计数 / 日志打脏
+      if (this._isDevtools()) return;
+
+      // 1) 实时日志：全量 errorLog（stack 已截断，安全）
+      if (this._reportGameLog) {
+        const lm = this._getLogManager();
+        if (lm) {
+          try {
+            lm.error('[crash] ' + (errorLog.source || 'unknown') + ' | ' + (errorLog.message || ''));
+            if (errorLog.stack) lm.error(errorLog.stack);
+            // 设备 + 游戏状态摘要：定位「哪类机子 / 哪个进度」崩溃
+            const dev = errorLog.device || {};
+            lm.warn('device=' + JSON.stringify(dev) + ' state=' + JSON.stringify(errorLog.gameState || null));
+          } catch (e) {
+            // 实时日志写失败不能影响玩法
+          }
+        }
+      }
+
+      // 2) 计数告警：崩溃事件 +1（未配置 eventId 则跳过）
+      if (this._eventId && typeof wx !== 'undefined') {
+        try {
+          if (typeof wx.reportEvent === 'function') {
+            // 主路径（基础库 ≥2.31.1）：事件在 运维中心/WE分析 → 数据管理 → 上报管理 新建
+            // 崩溃总数 = 事件触发次数（后台自动按 occurrence 统计，与是否传参数无关）。
+            // source 维度：在后台给该事件加一个 string 型参数 source 即可按来源
+            // (render/mainLoop/input…) 下钻；未注册则被静默忽略，不影响总数。
+            wx.reportEvent(this._eventId, {
+              source: errorLog.source || 'unknown'
+            });
+          } else if (typeof wx.reportMonitor === 'function') {
+            // 旧基础库兜底（reportMonitor 自 2.31.1 起已停止维护，仅保险用）
+            wx.reportMonitor(this._eventId, 1);
+          }
+        } catch (e) {
+          // 计数上报失败静默
+        }
+      }
+    } catch (e) {
+      // 上报链路自身失败，绝对不能反噬主流程
+      console.warn('[ErrorHandler] 运维中心上报异常:', e.message);
+    }
+  }
+
+  /**
+   * 懒初始化小游戏实时日志管理器（base lib 3.7.4+）
+   * @private
+   */
+  _getLogManager() {
+    if (this._logManager !== null) return this._logManager; // 已尝试过（含失败=null）
+    this._logManager = null;
+    try {
+      if (typeof wx !== 'undefined' && typeof wx.getGameLogManager === 'function') {
+        this._logManager = wx.getGameLogManager();
+      }
+    } catch (e) {
+      this._logManager = null;
+    }
+    return this._logManager;
+  }
+
+  /**
+   * 是否开发者工具环境（不写运维中心，避免污染生产监控）
+   * @private
+   */
+  _isDevtools() {
+    try {
+      if (typeof wx === 'undefined' || !wx.getSystemInfoSync) return false;
+      const si = wx.getSystemInfoSync();
+      return si && si.platform === 'devtools';
+    } catch (e) {
+      return false;
     }
   }
 }

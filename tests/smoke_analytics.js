@@ -114,6 +114,49 @@ console.log('【C】branchId 留空时不产生任何上报');
   ok('空 branchId 时不写去重存储', !Object.prototype.hasOwnProperty.call(storeC, C.FIRST_DONE_KEY));
 }
 
+// ===== D. U10 新增 5 个漏斗：维度夹紧 / branchId 路由 =====
+console.log('【D】U10 新增漏斗：draw/merge/defeat/share/ad 维度与 branchId 路由');
+{
+  const { wx: wxD, calls: callsD } = makeWx();
+  global.wx = wxD;
+  const D = freshAnalytics({
+    boot: '', battleStart: '', firstBattleDone: '',
+    draw: 'BR_DRAW', merge: 'BR_MERGE', battleDefeat: 'BR_DEF',
+    share: 'BR_SHARE', adWatch: 'BR_AD'
+  });
+  D.reportDraw(4);
+  { const l = callsD[callsD.length - 1]; ok('draw 稀有度 tier=4 → branchDim 5', l && l.branchId === 'BR_DRAW' && l.branchDim === '5', JSON.stringify(l)); }
+  D.reportDraw(0);
+  { const l = callsD[callsD.length - 1]; ok('draw 稀有度 tier=0 → branchDim 1', l && l.branchDim === '1', JSON.stringify(l)); }
+  D.reportDraw(2);
+  { const l = callsD[callsD.length - 1]; ok('draw 稀有度 tier=2 → branchDim 3', l && l.branchDim === '3', JSON.stringify(l)); }
+
+  D.reportMerge(3);
+  { const l = callsD[callsD.length - 1]; ok('merge 产物 tier=3 → branchDim 4', l && l.branchId === 'BR_MERGE' && l.branchDim === '4', JSON.stringify(l)); }
+
+  D.reportBattleDefeat(15);
+  { const l = callsD[callsD.length - 1]; ok('defeat stage=15 → branchDim 15', l && l.branchId === 'BR_DEF' && l.branchDim === '15', JSON.stringify(l)); }
+  D.reportBattleDefeat(0);
+  { const l = callsD[callsD.length - 1]; ok('defeat stage=0 → 夹紧 1', l && l.branchDim === '1', JSON.stringify(l)); }
+  D.reportBattleDefeat(999);
+  { const l = callsD[callsD.length - 1]; ok('defeat stage=999 → 夹紧 100', l && l.branchDim === '100', JSON.stringify(l)); }
+
+  D.reportShare();
+  { const l = callsD[callsD.length - 1]; ok('share 无维度 branchDim 空', l && l.branchId === 'BR_SHARE' && l.branchDim === '', JSON.stringify(l)); }
+  D.reportAdWatch();
+  { const l = callsD[callsD.length - 1]; ok('adWatch 无维度 branchDim 空', l && l.branchId === 'BR_AD' && l.branchDim === '', JSON.stringify(l)); }
+}
+
+// ===== E. 新增漏斗：空 branchId 完全不上报 =====
+console.log('【E】新增漏斗 branchId 留空时零上报');
+{
+  const { wx: wxE, calls: callsE } = makeWx();
+  global.wx = wxE;
+  const E = freshAnalytics({ boot: '', battleStart: '', firstBattleDone: '', draw: '', merge: '', battleDefeat: '', share: '', adWatch: '' });
+  E.reportDraw(4); E.reportMerge(1); E.reportBattleDefeat(3); E.reportShare(); E.reportAdWatch();
+  ok('空 branchId 时 5 个新漏斗零上报', callsE.length === 0, 'n=' + callsE.length);
+}
+
 console.log('\n────────────────────────');
 console.log('通过 ' + pass + ' / 失败 ' + fail);
 process.exit(fail ? 1 : 0);

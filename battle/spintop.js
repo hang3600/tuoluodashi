@@ -4,8 +4,8 @@
  * 陀螺品质/等级通过 Beyblade 映射为摩擦、最高转速、得分倍率。
  */
 
-const { randomBeyblade, drawBeyblade, ELEMENTS, elementMultiplier } = require('../src/beyblade');
-const { drawVectorIcon, prepSrc: _prepSrc } = require('../src/utils');
+const { randomBeyblade, drawBeyblade, ELEMENTS, elementMultiplier, getTierLevelImg } = require('../src/beyblade');
+const { drawVectorIcon, prepSrc: _prepSrc, loadOne: _loadOne, downscaleToCap } = require('../src/utils');
 const { reportBattleStart, reportFirstBattleDone } = require('../src/analytics'); // 零成本埋点（P1 数据盲区）
 
 /**
@@ -120,7 +120,8 @@ const _ICON_B64 = (function () { try { return require('../src/assets').icons; } 
       const im = mkImg();
       im.onload = (function (o) { return function () { o._ok = true; }; })(im);
       im.onerror = function () {};
-      // 真机加固：dataURI onload 不可靠 → 改从 USER_DATA_PATH 文件路径加载（见 utils.prepSrc）
+      // src 由 utils.prepSrc 产出：模拟器 → data URI；真机 → 包内路径 images/<folder>/<file>
+      // （真机曾改用 USER_DATA_PATH 写文件再加载，已废弃：包内路径 + wx.createImage 更稳）
       im.src = _prepSrc(_ICON_B64 && _ICON_B64[_propFiles[k]], _propFiles[k], 'icons');
       _propImgs[k] = im;
     }
@@ -141,6 +142,9 @@ const _topFiles = ['top-earth.png', 'top-wood.png', 'top-water.png', 'top-fire.p
 const _topImgs = [];
 // base64 内嵌（require 直接注入）；真机加载加固由 utils.prepSrc 负责（dataURI onload 不可靠 → 改文件路径）
 const _TOP_B64 = (function () { try { return require('../src/assets').tops; } catch (e) { return null; } })();
+// 竞技场背景贴图（AI 生成）内嵌 base64（见 battle/arenabg.js）；经 utils.prepSrc 加载：
+// 模拟器直接走 data URI（零 HTTP，规避 DevTools 不服务新增 images 目录的 404），真机写 USER_DATA_PATH 后按文件路径加载。
+const _ARENA_B64 = (function () { try { return require('./arenabg'); } catch (e) { return null; } })();
 (function loadTopPNGs() {
   try {
     const mkImg = (typeof wx !== 'undefined' && wx.createImage) ? wx.createImage
@@ -150,7 +154,8 @@ const _TOP_B64 = (function () { try { return require('../src/assets').tops; } ca
       const im = mkImg();
       im.onload = (function (o) { return function () { o._ok = true; }; })(im);
       im.onerror = function () {};
-      // 真机加固：dataURI onload 不可靠 → 改从 USER_DATA_PATH 文件路径加载（见 utils.prepSrc）
+      // src 由 utils.prepSrc 产出：模拟器 → data URI；真机 → 包内路径 images/<folder>/<file>
+      // （真机曾改用 USER_DATA_PATH 写文件再加载，已废弃：包内路径 + wx.createImage 更稳）
       im.src = _prepSrc(_TOP_B64 && _TOP_B64[i], _topFiles[i], 'tops');
       _topImgs[i] = im;
     }
@@ -169,7 +174,8 @@ const _hudImgs = {};
       const im = mkImg();
       im.onload = (function (o) { return function () { o._ok = true; }; })(im);
       im.onerror = function () {};
-      // 真机加固：dataURI onload 不可靠 → 改从 USER_DATA_PATH 文件路径加载（见 utils.prepSrc）
+      // src 由 utils.prepSrc 产出：模拟器 → data URI；真机 → 包内路径 images/<folder>/<file>
+      // （真机曾改用 USER_DATA_PATH 写文件再加载，已废弃：包内路径 + wx.createImage 更稳）
       im.src = _prepSrc(_ICON_B64 && _ICON_B64[_hudFiles[k]], _hudFiles[k], 'icons');
       _hudImgs[k] = im;
     }
@@ -195,6 +201,17 @@ function hexToRgba(hex, alpha) {
   return `rgba(${r},${g},${b},${alpha})`;
 }
 
+// f>0 提亮（向白混合），f<0 压暗（向黑混合），返回 #rrggbb（用于不透明盘底着色）
+function shade(hex, f) {
+  const h = (hex || '#ffffff').replace('#', '');
+  const r = parseInt(h.substring(0, 2), 16);
+  const g = parseInt(h.substring(2, 4), 16);
+  const b = parseInt(h.substring(4, 6), 16);
+  const adj = (c) => Math.max(0, Math.min(255, Math.round(c + (f > 0 ? (255 - c) * f : c * f))));
+  const to2 = (x) => x.toString(16).padStart(2, '0');
+  return '#' + to2(adj(r)) + to2(adj(g)) + to2(adj(b));
+}
+
 function roundRectPath(ctx, x, y, w, h, r) {
   ctx.beginPath();
   ctx.moveTo(x + r, y);
@@ -212,6 +229,10 @@ function formatNumber0(n) {
   if (v < 100000000) return (Math.floor(v / 100) / 10).toFixed(1).replace(/\.0$/, '') + '万';
   return (Math.floor(v / 1000000) / 10).toFixed(1).replace(/\.0$/, '') + '亿';
 }
+
+function clamp01(x) { return x < 0 ? 0 : (x > 1 ? 1 : x); }
+function easeOutCubic(x) { return 1 - Math.pow(1 - x, 3); }
+function easeOutBack(x) { const c1 = 1.70158, c3 = c1 + 1; const u = x - 1; return 1 + c3 * u * u * u + c1 * u * u; }
 
 class SpintopBattle {
   constructor(game, width, height) {
@@ -235,6 +256,7 @@ class SpintopBattle {
     // 每帧渐变对象缓存：满帧对战里反复 createRadialGradient 是 GC 主因，按 颜色+半径 复用即可
     this._topGrads = {};
     this._arenaGrad = null;
+    this._gradCtxCache = new WeakMap();  // 按 ctx 身份键控的每帧渐变缓存（详见 _gradFor）
     this._topCache = null;         // 玩家陀螺离屏位图缓存（关键 DrawCall 优化）
     this._enemyCache = null;       // 敌方陀螺独立缓存
     this._bgSprite = null;         // 对战背景合并位图（arena 渐变 + 星空，每帧 1 次全屏 drawImage）
@@ -244,6 +266,10 @@ class SpintopBattle {
     this._arenaDecorKey = '';
     this._sceneSprite = null;      // 静态场景合并位图（_bgSprite + _arenaDecorSprite 合成一张，每帧 1 次全屏 drawImage 替代 2 次）
     this._sceneKey = '';
+    this._bgImage = null;          // AI 竞技场背景贴图（battle/images/arena/arena_neon_bg.jpg，已随 battle 分包分发）
+    this._bgImageLoading = false;  // 防止重复触发加载
+    this._bgImageFailed = false;   // 加载失败则停止重试（避免每帧重入）
+    this._bgImagePath = '/battle/images/arena/arena_neon_bg.jpg';  // arena 背景已随 battle 分包分发
 
     this.score = 0;
     this.displayScore = 0;
@@ -292,6 +318,21 @@ class SpintopBattle {
     this._hitstopT = 0;    // 批次F·命中定帧剩余时间（>0 时冻结玩法时间）
     this._hitstopCd = 0;   // 撞击定帧冷却（防持续贴身反复触发导致游戏近乎静止）
 
+    // #7 打击感：受击反馈改为「非形变」——硬陀螺硬碰硬，命中只触发白闪/冲击波/粒子，
+    // 不再压扁陀螺本体（既保留体积感反馈、又符合"硬"的设定，避免真机上被误认为变形 bug）。
+    // #7 打击感·命中白闪：additive 闪光层（暴击/重击更亮），与 shockwave 互补（shockwave 是环、flash 是实心光斑）
+    this.hitFlashes = [];
+    this._trailGlow = 0;     // #7 打击感·拖尾辉光强度（暴击满/重击半，update 衰减）
+
+    // #8 怒气必杀：怒气 0..100 由命中/撞击积累，满则 HUD 出现「必杀」按钮；
+    // 触发 _releaseUltimate 全屏演出 + 得分爆发（不依赖第三方资源，纯 Canvas + WebAudio）。
+    this.rage = 0;           // 当前怒气（0..100）
+    this._ultActive = false; // 必杀演出进行中
+    this._ultT = 0;          // 必杀演出计时
+    this._ultFlash = 0;      // 全屏白闪残留（1→0）
+    this._ultButton = null;  // 本帧「必杀」可点区域（draw 时填充，供 hitTest）
+
+
     // 性能护栏：粒子硬上限 + 帧率软上限（低端机防极端掉帧，兜底 P1）
     this.MAX_PARTICLES = 140;
     this._lowPerf = false;       // 软上限标志：低帧率时降效（少生粒子/关拖尾）
@@ -320,6 +361,7 @@ class SpintopBattle {
     this._resultStartTime = 0;    // 结算开始时间（用于入场动画）
     this._resultParticles = [];   // 结算粒子（胜利金色/失败灰色）
     this._resultStarCount = 0;    // 胜利星级（1-3星）
+    this._pressedAction = null;   // 当前按下的结算按钮 action（按下态视觉反馈）
   }
 
   /** 启动时性能档应用：LOW 关装饰阴影+粒子减半+关拖尾；MID 中画质（减半粒子+降光晕）；HIGH 全特效 */
@@ -464,6 +506,7 @@ class SpintopBattle {
       color: eTierColor, secondaryColor: eTierGlow, glowColor: eTierGlow, trailColor: eTierGlow,
       mass: 1 + eTier * 0.15 + diff0 * 0.4
     };
+    // #7 敌方受击反馈与玩家同源（白闪/冲击波/粒子），不再单独维护 squash 形变字段
     this._enemyChargeCd = 1.6;
     this._enemyCharging = 0;
     this._enemyWanderAng = Math.random() * Math.PI * 2;
@@ -495,6 +538,14 @@ class SpintopBattle {
     // 批次E·应用已累积的 run buff（叠层）
     for (let i = 0; i < this.runBuffs.length; i++) this._applyRunBuff(this.runBuffs[i]);
     this.particles.length = 0;
+
+    // #9 关卡/BOSS 化：每 5 关为 BOSS 关（更厚血 + 基础更快），支持二阶段狂暴
+    this.isBoss = (this.runStage % 5 === 0);
+    this._bossEnraged = false;
+    if (this.isBoss && this.targetScore > 0) {
+      this.targetScore = Math.floor(this.targetScore * 1.6);   // BOSS 更厚血（目标分更高）
+      if (this.enemy) this.enemy.maxSpeed *= 1.15;             // BOSS 基础更快
+    }
     this.floatingTexts.length = 0;
     this.trailPoints.length = 0;
     this._trailPool.length = 0;
@@ -633,6 +684,14 @@ class SpintopBattle {
     this.score += earnedScore;
     this.screenShake = Math.min(SHAKE_MAX, fEff * 0.6);
 
+    // #7 打击感·命中火光（非形变）：暖色火光（暖白核心→橙红），半径更小更聚焦、亮度设上限，
+    // 与碰撞火光统一；原纯白巨斑（半径 1.7~2.4r、alpha=0.4+fEff*0.35 无上限）连打时满屏白斑
+    const flashR = top.radius * (isCrit ? 1.0 : 0.7);
+    const flashA = Math.min(0.5, isCrit ? 0.5 : (0.18 + fEff * 0.06));
+    this.hitFlashes.push({ x: top.x, y: top.y, r: flashR, alpha: flashA, warm: true, t: 0 });
+    // #7 打击感·拖尾辉光：暴击满辉、重击半辉，update 衰减（驱动 _drawTrail 加粗发光）
+    this._trailGlow = isCrit ? 1 : (fEff > top.maxSpeed * 0.7 ? 0.5 : this._trailGlow);
+
     // 命中闪光（陀螺位置爆发光效）
     this.shockwaves.push({ x: top.x, y: top.y, radius: top.radius * 1.5, maxRadius: top.radius * (isCrit ? 6 : 4), alpha: isCrit ? 1 : 0.8, color: isCrit ? '#FFD700' : top.color });
     if (isCrit) {
@@ -664,18 +723,28 @@ class SpintopBattle {
       this.shockwaves.push({ x: top.x, y: top.y, radius: top.radius * 2, maxRadius: top.radius * 8, alpha: 0.7, color: '#FFD700' });
     }
 
+    // #8 怒气必杀：有效命中积累怒气（打偏不积累）；暴击/连击额外加成，封顶 100
+    if (grade !== 'miss') {
+      this._addRage(8 * fEff + (isCrit ? 10 : 0) + Math.min(this.combo, 20) * 0.4);
+    }
+
     if (typeof wx !== 'undefined' && wx.vibrateShort) {
       wx.vibrateShort({ type: isCrit ? 'heavy' : (fEff > top.maxSpeed * 0.8 ? 'heavy' : 'medium') });
     }
-    if (this.audio) this.audio.play('clash', { freq: 1400 + fEff * 8 + (isCrit ? 400 : 0), gain: 0.22 + fEff * 0.004 + (isCrit ? 0.1 : 0) });
+    // #7 打击感·音效分层：按力度/暴击路由不同音 —— 轻击(clash_light)/重击(clash_heavy)/暴击(crit)
+    if (this.audio) {
+      if (isCrit) this.audio.play('crit');
+      else if (fEff > top.maxSpeed * 0.7) this.audio.play('clash_heavy', { freq: 1400 + fEff * 8, gain: 0.3 });
+      else this.audio.play('clash_light', { freq: 1100 + fEff * 8, gain: 0.2 });
+    }
   }
 
   _addFloatingText(x, y, text, color, isCombo, scale) {
     let ft = this._ftPool.pop();
     if (!ft) ft = {};   // 池空才 new，其余复用（对象池：消除抽打高频 GC）
-    ft.x = x + (Math.random() - 0.5) * 30; ft.y = y; ft.text = text; ft.color = color;
-    ft.size = isCombo ? 32 : 24; ft.alpha = 1; ft.vy = -2.5;
-    ft.rotation = (Math.random() - 0.5) * 0.3; ft.scale = (isCombo ? 1.8 : 1) * (scale || 1);
+    ft.x = x + (Math.random() - 0.5) * 44; ft.y = y; ft.text = text; ft.color = color;
+    ft.size = isCombo ? 22 : 15; ft.alpha = 0.92; ft.vy = -2.1;
+    ft.rotation = (Math.random() - 0.5) * 0.22; ft.scale = (isCombo ? 1.45 : 1) * (scale || 1);
     ft.isCombo = isCombo; ft.bounce = 0;
     this.floatingTexts.push(ft);
   }
@@ -758,7 +827,8 @@ class SpintopBattle {
       const y = Math.max(ST + 120, H * 0.24);
       bandOK.push([y, y + 36]);
     }
-    const [t0, t1] = bandOK[Math.floor(Math.random() * bandOK.length)];
+    const _spawnPair = bandOK[Math.floor(Math.random() * bandOK.length)];
+    const t0 = _spawnPair[0], t1 = _spawnPair[1];
     const y = t0 + Math.random() * (t1 - t0);
 
     // x：避开教程卡横带（若 active）+ 避开陀螺横带 + 避开进度条横带中央（barX~barX+barW）
@@ -888,6 +958,56 @@ class SpintopBattle {
         try { this.game.save(); } catch (e) {}
       }
     }
+
+    // 结算页面游戏化初始化（胜利/失败音效、震动、星级、粒子一并在此触发，
+    // 确保结算屏一出现就播放入场动画与粒子——此前这段逻辑误放在 end()（仅退战斗时调用），
+    // 导致真机结算屏期间 _resultStartTime 恒为 0、粒子为空，入场动画与粒子层从未触发）
+    this._resultStartTime = Date.now();
+    const isWin = this.result === 'win';
+
+    // 胜利/失败音效（音频模块已定义 win 上扬 / lose 下沉）
+    if (this.audio) this.audio.play(isWin ? 'win' : 'lose');
+
+    // 震动反馈：胜利轻震动，失败重震动
+    if (typeof wx !== 'undefined' && wx.vibrateShort) {
+      if (isWin) wx.vibrateShort({ type: 'light' });
+      else wx.vibrateShort({ type: 'heavy' });
+    }
+
+    // 星级评价（胜利时）：根据分数/目标比例
+    if (isWin) {
+      const ratio = this.targetScore > 0 ? this.score / this.targetScore : 1;
+      if (ratio >= 1.5) this._resultStarCount = 3;
+      else if (ratio >= 1.2) this._resultStarCount = 2;
+      else this._resultStarCount = 1;
+    } else {
+      this._resultStarCount = 0;
+    }
+
+    // 结算粒子初始化（胜利：金色星星/圆点；失败：灰色碎片）
+    this._resultParticles = [];
+    const pCount = this._fxLow ? 15 : 30;
+    for (let i = 0; i < pCount; i++) {
+      this._resultParticles.push({
+        x: Math.random() * this.width,
+        y: -20 - Math.random() * 100,
+        vx: (Math.random() - 0.5) * 1.5,
+        vy: 1 + Math.random() * 2,
+        size: isWin ? (3 + Math.random() * 5) : (2 + Math.random() * 3),
+        rotation: Math.random() * Math.PI * 2,
+        rotSpeed: (Math.random() - 0.5) * 0.1,
+        alpha: 0.6 + Math.random() * 0.4,
+        type: isWin ? (Math.random() > 0.5 ? 'star' : 'dot') : 'shard',
+        color: isWin ? (Math.random() > 0.5 ? '#FFD700' : '#FFA500') : '#888888'
+      });
+    }
+
+    // 清理战斗特效数组，释放内存（切换结算屏）
+    this.particles.length = 0;
+    this.floatingTexts.length = 0;
+    this.trailPoints.length = 0;
+    this.shockwaves.length = 0;
+    this.powerups.length = 0;
   }
 
   update(dt) {
@@ -963,6 +1083,27 @@ class SpintopBattle {
     if (this.screenShake > 0) {
       this.screenShake *= Math.pow(0.85, timeScale);
       if (this.screenShake < 0.1) this.screenShake = 0;
+    }
+
+    // #7 打击感·命中白闪 衰减（真实时间推进，定帧期间已 return 不在此）
+    if (this.hitFlashes.length) {
+      for (let i = this.hitFlashes.length - 1; i >= 0; i--) {
+        const f = this.hitFlashes[i];
+        f.t += dt;
+        f.alpha = Math.max(0, f.alpha - dt * 3.2);   // 约 310ms 淡出
+        if (f.alpha <= 0) this.hitFlashes.splice(i, 1);
+      }
+    }
+    if (this._trailGlow > 0) {
+      this._trailGlow -= dt * 1.6;
+      if (this._trailGlow < 0) this._trailGlow = 0;
+    }
+
+    // #8 怒气必杀·演出计时与白闪衰减（真实时间推进，定帧期间已 return 不在此）
+    if (this._ultActive) {
+      this._ultT += dt;
+      if (this._ultFlash > 0) { this._ultFlash -= dt * 1.5; if (this._ultFlash < 0) this._ultFlash = 0; }
+      if (this._ultT >= 0.9) this._ultActive = false;  // 演出约 0.9s 收尾
     }
 
     if (!this._lowPerf && Math.abs(top.angularVelocity) > 2) {
@@ -1090,6 +1231,18 @@ class SpintopBattle {
     if (this.timeRemaining <= 0 || top.angularVelocity === 0) {
       this._settle();
     }
+
+    // #9 BOSS 二阶段：分数过半（敌血过半）触发狂暴，更猛更快
+    if (this.isBoss && !this._bossEnraged && this.targetScore > 0 && this.score >= this.targetScore * 0.5) {
+      this._bossEnraged = true;
+      if (this.enemy) {
+        this.enemy.maxSpeed *= 1.25;
+        this.enemy.friction = Math.min(0.996, (this.enemy.friction || 0.985) + 0.006);
+      }
+      this.screenShake = Math.max(this.screenShake, 12);
+      if (this.audio) this.audio.play('crit');
+      this._addFloatingText(this.width / 2, this.height / 2 - 150, 'BOSS 狂暴！', '#ff5252', true, 2.4);
+    }
   }
 
   _updateEnemyAI(dt, timeScale, ccx, ccy, arenaR) {
@@ -1157,20 +1310,61 @@ class SpintopBattle {
     b.vx += ix * ma; b.vy += iy * ma;
     // 撞击反馈（复用现有粒子/震屏/音效）
     const hx = (a.x + b.x) / 2, hy = (a.y + b.y) / 2;
-    this._createParticles(hx, hy, 10, '#ffd54f');
+    const impact = Math.min(0.5, Math.abs(velAlongNormal) * 0.06);
+    // 火光四射：橙红火星（主，四散飞溅）+ 白热高光芯（少量，撞击最热点）；取代原先单一浅金（偏白、显脏）
+    this._createParticles(hx, hy, 14, '#ff8a1e');   // 橙红火花
+    this._createParticles(hx, hy, 6,  '#fff1c2');   // 白热高光芯
     this.screenShake = Math.max(this.screenShake, 6);
-    // 批次F·命中定帧：撞击是最重的打击点，冻结 90ms（与暴击定帧取较大值，不叠加）
-    // 两道闸门：相对速度够大（真撞击而非贴着蹭）+ 冷却已过。缺任一都会让贴身状态卡死游戏。
+    // #8 怒气必杀：撞击也积累少量怒气（鼓励贴身缠斗）
+    this._addRage(5);
+    // #7 打击感·命中火光：仅在真撞击（相对速度够大 + 冷却已过）时迸发，
+    // 避免贴身缠斗每帧刷白闪 → 大面积泛白。火光用暖白→橙红渐变、半径更小更聚焦，不再纯白漫射。
     if (Math.abs(velAlongNormal) > HITSTOP_MIN_IMPACT && this._hitstopCd <= 0) {
+      this.hitFlashes.push({ x: hx, y: hy, r: (a.radius + b.radius) * 0.34, alpha: 0.32 + impact * 0.5, warm: true, t: 0 });
+      // 撞击环：橙红冲击波，强化"迸发"张力
+      this.shockwaves.push({ x: hx, y: hy, radius: (a.radius + b.radius) * 0.3, maxRadius: (a.radius + b.radius) * 1.5, alpha: 0.5, color: '#ff8a1e' });
+      // 批次F·命中定帧：撞击是最重的打击点，冻结 90ms（与暴击定帧取较大值，不叠加）
       this._hitstopT = Math.max(this._hitstopT, HITSTOP_COLLISION);
       this._hitstopCd = HITSTOP_COLLISION_CD;
     }
-    if (this.audio) this.audio.play('clash', { freq: 500, gain: 0.2 });
+    // #7 打击感·音效分层：撞击按相对速度分轻/重
+    if (this.audio) {
+      if (Math.abs(velAlongNormal) > HITSTOP_MIN_IMPACT * 1.5) this.audio.play('clash_heavy', { freq: 520, gain: 0.26 });
+      else this.audio.play('clash_light', { freq: 420, gain: 0.18 });
+    }
     // 撞击小额得分奖励（鼓励进攻）；加冷却，避免持续贴身每帧刷分导致「不操作自动赢」
     if (this._hitScoreCd <= 0) {
       this.score += Math.floor(6 * (this.scoreMultiplier || 1));
       this._hitScoreCd = 0.7;
     }
+  }
+
+  // #8 怒气必杀·累加怒气（封顶 100，溢出丢弃）
+  _addRage(v) {
+    if (!v || v <= 0) return;
+    this.rage = Math.min(100, (this.rage || 0) + v);
+  }
+
+  // #8 怒气必杀·释放：满怒才可用。全屏演出（白闪+震屏+定帧+粒子冲击波）+ 得分爆发。
+  // 纯 Canvas + WebAudio，无第三方资源依赖；返回 true 表示成功释放。
+  _releaseUltimate() {
+    if (this.phase !== 'playing' || this.rage < 100) return false;
+    this.rage = 0;
+    this._ultActive = true;
+    this._ultT = 0;
+    this._ultFlash = 1;                 // 全屏白闪（update 衰减）
+    if (this.audio) this.audio.play('ultimate');
+    this.screenShake = Math.max(this.screenShake, SHAKE_MAX);
+    this._hitstopT = Math.max(this._hitstopT, 0.20);  // 定帧 200ms，强调「出招瞬间」
+    const cx = this.width / 2, cy = this.height / 2;
+    this._createParticles(cx, cy, 40, '#ffd54f');
+    this._createParticles(cx, cy, 24, '#ffffff');
+    this.shockwaves.push({ x: cx, y: cy, radius: 12, maxRadius: Math.max(this.width, this.height), alpha: 1, color: '#ffd54f' });
+    // 得分爆发：当前分 × 0.4 + 保底 300，直接进分（演出结束后按displayScore滚动显示）
+    const burst = Math.floor(this.score * 0.4 + 300);
+    this.score += burst;
+    this._addFloatingText(cx, cy - 120, '必杀！+' + burst, '#ffd54f', true, 2.4);
+    return true;
   }
 
   // 批次E·应用单个 run buff（叠层）
@@ -1256,56 +1450,42 @@ class SpintopBattle {
     this.countdown = 0;
     this._countGoPlayed = false;
     if (this.audio) this.audio.stopSpin();   // 战斗结束停掉旋转摩擦声
-
-    // ============================================================
-    // 结算页面游戏化初始化
-    // ============================================================
-    this._resultStartTime = Date.now();
-    const isWin = this.result === 'win';
-
-    // 星级评价（胜利时）：根据分数/目标比例
-    if (isWin) {
-      const ratio = this.targetScore > 0 ? this.score / this.targetScore : 1;
-      if (ratio >= 1.5) this._resultStarCount = 3;      // 超过目标50% → 3星
-      else if (ratio >= 1.2) this._resultStarCount = 2; // 超过目标20% → 2星
-      else this._resultStarCount = 1;                      // 刚好达标 → 1星
-    } else {
-      this._resultStarCount = 0;
-    }
-
-    // 结算粒子初始化（胜利：金色星星/圆点；失败：灰色碎片）
-    this._resultParticles = [];
-    const pCount = this._fxLow ? 15 : 30;
-    for (let i = 0; i < pCount; i++) {
-      this._resultParticles.push({
-        x: Math.random() * this.width,
-        y: -20 - Math.random() * 100,  // 从屏幕上方开始
-        vx: (Math.random() - 0.5) * 1.5,
-        vy: 1 + Math.random() * 2,
-        size: isWin ? (3 + Math.random() * 5) : (2 + Math.random() * 3),
-        rotation: Math.random() * Math.PI * 2,
-        rotSpeed: (Math.random() - 0.5) * 0.1,
-        alpha: 0.6 + Math.random() * 0.4,
-        type: isWin ? (Math.random() > 0.5 ? 'star' : 'dot') : 'shard',
-        color: isWin ? (Math.random() > 0.5 ? '#FFD700' : '#FFA500') : '#888888'
-      });
-    }
-
-    // 震动反馈：胜利轻震动，失败重震动
-    if (typeof wx !== 'undefined' && wx.vibrateShort) {
-      if (isWin) {
-        wx.vibrateShort({ type: 'light' });
-      } else {
-        wx.vibrateShort({ type: 'heavy' });
-      }
-    }
-
-    // 清理特效数组，释放内存
+    // 退战斗清理：释放特效数组内存（结算初始化已改到 _settle 入口触发）
     this.particles.length = 0;
     this.floatingTexts.length = 0;
     this.trailPoints.length = 0;
     this.shockwaves.length = 0;
     this.powerups.length = 0;
+    this._resultParticles.length = 0;
+  }
+
+  /**
+   * 每帧渐变缓存（对应 src/render.js 的 _gradFor，但改用 WeakMap 按 ctx 身份键控）。
+   *
+   * 为什么不能照抄 render.js 的 `ctx === this.ctx` 守卫：本类 draw(ctx) 的 ctx 是**入参**，
+   * 且并存多个离屏 ctx（背景 c、陀螺精灵 c、装饰 g），恒等比较永远不命中 → 等于没缓存。
+   * CanvasGradient 跨 ctx 复用在小游戏实现里不保证安全，所以按 ctx 各自一张 Map 隔离。
+   *
+   * key 由「运行时坐标 + 色标」拼成，所以静态渐变 key 恒定 → 命中缓存；
+   * 动画渐变（依赖 Date.now()）key 每帧变 → 自动不命中，视觉零回归。
+   * 因此调用方只需给动画渐变**不要**接进来即可（省掉拼 key 的无用开销）。
+   *
+   * 超过 cap 时逐条淘汰最老 key（FIFO），而不是 clear() 整表——避免万一有变动 key
+   * 接进来时把其它有用条目一起清掉造成缓存抖动。
+   */
+  _gradFor(ctx, key, create) {
+    if (!ctx) return create();
+    let m = this._gradCtxCache.get(ctx);
+    if (!m) { m = new Map(); this._gradCtxCache.set(ctx, m); }
+    const hit = m.get(key);
+    if (hit) return hit;
+    const g = create();
+    m.set(key, g);
+    if (m.size > 128) {
+      const oldest = m.keys().next();
+      if (!oldest.done) m.delete(oldest.value);
+    }
+    return g;
   }
 
   /** 渲染整屏抽打场景，返回结果面板按钮（供 hitTest 使用） */
@@ -1313,6 +1493,10 @@ class SpintopBattle {
     const w = this.width, h = this.height;
     const top = this.top;
     const buttons = [];
+    this._ultButton = null;   // #8 每帧重置，仅在 playing 且怒气满时由 _drawHUD 填充
+
+    // 异步加载 AI 竞技场背景图；无 wx/Image 的 headless 环境会自然跳过。
+    this._ensureBgImage();
 
     let arenaGrad = this._arenaGrad;
     if (!arenaGrad) {
@@ -1393,18 +1577,29 @@ class SpintopBattle {
         }
       }
     }
-    // 绘制：优先合并位图（1 次 blit）；不可用时回退「bg + 装饰」分两次（保持原行为）
-    if (this._sceneSprite) {
-      try { ctx.drawImage(this._sceneSprite, 0, 0, w, h); }
+    // 绘制：优先 AI 竞技场背景图（cover-fit）；未加载时回退合并位图 / 渐变
+    let decorAlreadyInBase = false;
+    if (this._bgImage && this._bgImage.width > 0 && this._bgImage.height > 0) {
+      try {
+        const iw = this._bgImage.width, ih = this._bgImage.height;
+        const scale = Math.max(w / iw, h / ih);  // cover：短边撑满，长边裁切
+        const dw = iw * scale, dh = ih * scale;
+        const dx = (w - dw) / 2, dy = (h - dh) / 2;
+        ctx.drawImage(this._bgImage, dx, dy, dw, dh);
+      } catch (e) { this._bgImage = null; }
+    } else if (this._sceneSprite) {
+      try { ctx.drawImage(this._sceneSprite, 0, 0, w, h); decorAlreadyInBase = true; }
       catch (e) { this._sceneSprite = null; }
-    }
-    if (!this._sceneSprite) {
+    } else {
       if (this._bgSprite) {
         try { ctx.drawImage(this._bgSprite, 0, 0, w, h); }
         catch (e) { this._bgSprite = null; ctx.fillStyle = arenaGrad; ctx.fillRect(0, 0, w, h); this._drawStars(ctx); }
       } else {
         ctx.fillStyle = arenaGrad; ctx.fillRect(0, 0, w, h); this._drawStars(ctx);
       }
+    }
+    // 竞技环装饰叠在上层（半透明盘，不挡背景但保证陀螺可读；_sceneSprite 已含装饰则不再画）
+    if (!decorAlreadyInBase) {
       if (this._arenaDecorSprite) {
         try { ctx.drawImage(this._arenaDecorSprite, 0, 0, w, h); }
         catch (e) { this._arenaDecorSprite = null; this._bakeArenaDecor(ctx, arenaCx, arenaCy, arenaR, innerR, top.color); }
@@ -1469,8 +1664,12 @@ class SpintopBattle {
       ctx.restore();
     }
 
+    // 常驻身份标识：蓝环+「你」= 玩家，红环+「对手」= 对手（screen space，不随陀螺旋转）
+    this._drawTopMarkers(ctx);
+
     this._drawParticles(ctx);
     this._drawShockwaves(ctx);
+    this._drawHitFlashes(ctx);       // #7 打击感·命中白闪（additive，盖在粒子/冲击波之上）
     this._drawFieldPowerups(ctx);    // 场中飘浮的可收集道具球（与 HUD/激活道具分画）
 
     if (this.isWhipping) this._drawWhipGesture(ctx);
@@ -1501,10 +1700,13 @@ class SpintopBattle {
       }
 
       // 渐变背景（深色→主题色→深色）
-      const backGrad = ctx.createLinearGradient(backX, backY, backX, backY + backH);
-      backGrad.addColorStop(0, this._lightenColor(top.color, 0.15));
-      backGrad.addColorStop(0.5, top.color);
-      backGrad.addColorStop(1, this._darkenColor(top.color, 0.2));
+      const backGrad = this._gradFor(ctx, 'back|' + backX + '|' + backY + '|' + backH + '|' + top.color, () => {
+        const g = ctx.createLinearGradient(backX, backY, backX, backY + backH);
+        g.addColorStop(0, this._lightenColor(top.color, 0.15));
+        g.addColorStop(0.5, top.color);
+        g.addColorStop(1, this._darkenColor(top.color, 0.2));
+        return g;
+      });
       ctx.fillStyle = backGrad;
       roundRectPath(ctx, backX, backY, backW, backH, backH / 2); ctx.fill();
 
@@ -1522,9 +1724,12 @@ class SpintopBattle {
       ctx.save();
       roundRectPath(ctx, backX, backY, backW, backH / 2, backH / 2);
       ctx.clip();
-      const hlGrad = ctx.createLinearGradient(backX, backY, backX, backY + backH / 2);
-      hlGrad.addColorStop(0, 'rgba(255,255,255,0.3)');
-      hlGrad.addColorStop(1, 'rgba(255,255,255,0)');
+      const hlGrad = this._gradFor(ctx, 'backhl|' + backX + '|' + backY + '|' + backH, () => {
+        const g = ctx.createLinearGradient(backX, backY, backX, backY + backH / 2);
+        g.addColorStop(0, 'rgba(255,255,255,0.3)');
+        g.addColorStop(1, 'rgba(255,255,255,0)');
+        return g;
+      });
       ctx.fillStyle = hlGrad;
       ctx.fillRect(backX, backY, backW, backH / 2);
       ctx.restore();
@@ -1532,13 +1737,12 @@ class SpintopBattle {
       // 返回图标（左侧）
       drawHudIcon(ctx, 'back', backX + 18, backCy, 16);
 
-      // 返回文字（右侧）
+      // 返回文字（右侧；低端机关闭文字阴影，省 CPU）
       ctx.fillStyle = '#ffffff';
       ctx.font = 'bold 14px sans-serif';
       ctx.textAlign = 'left';
       ctx.textBaseline = 'middle';
-      ctx.shadowColor = 'rgba(0,0,0,0.5)';
-      ctx.shadowBlur = 2;
+      if (!this._fxLow) { ctx.shadowColor = 'rgba(0,0,0,0.5)'; ctx.shadowBlur = 2; }
       ctx.fillText('返回', backX + 30, backCy + 0.5);
       ctx.shadowBlur = 0;
 
@@ -1546,6 +1750,7 @@ class SpintopBattle {
 
       buttons.push({ x: backX, y: backY, w: backW, h: backH, action: 'battle_back' });
     }
+    if (this.phase === 'playing') this._drawHudFrame(ctx);
     if (this.phase === 'playing' && this.whipCount < 2) this._drawTutorialHint(ctx);
 
     ctx.restore();
@@ -1606,12 +1811,46 @@ class SpintopBattle {
       ctx.restore();
     }
 
+    // #8 怒气必杀·全屏演出覆盖层（白闪 + 必杀大字），盖在场景与 HUD 之上
+    if (this._ultActive || this._ultFlash > 0) this._drawUltimate(ctx);
+
     if (this.phase === 'result') {
       const rButtons = this._drawResult(ctx);
-      buttons.push(...rButtons);
+      for (let _rb = 0; _rb < rButtons.length; _rb++) buttons.push(rButtons[_rb]);
     }
 
+    if (this._ultButton) buttons.push(this._ultButton);  // #8 必杀按钮可点区域
+
     return buttons;
+  }
+
+  // #8 怒气必杀·全屏演出：白闪 + 居中「必杀！」大字（随演出缩放淡出）
+  _drawUltimate(ctx) {
+    const w = this.width, h = this.height;
+    const cx = w / 2, cy = h / 2;
+    ctx.save();
+    // 全屏白闪（_ultFlash: 1→0）
+    if (this._ultFlash > 0) {
+      ctx.globalAlpha = Math.min(0.85, this._ultFlash);
+      ctx.fillStyle = '#ffffff';
+      ctx.fillRect(0, 0, w, h);
+      ctx.globalAlpha = 1;
+    }
+    // 必杀大字（演出前段放大淡出）
+    if (this._ultActive) {
+      const p = Math.min(1, this._ultT / 0.9);
+      const scale = 2.4 - p * 1.0;            // 2.4 → 1.4
+      const alpha = p < 0.7 ? 1 : (1 - (p - 0.7) / 0.3);
+      ctx.globalAlpha = Math.max(0, alpha);
+      ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+      ctx.font = 'bold ' + Math.floor(64 * scale) + 'px ' + APPLE_FONT;
+      if (!this._fxLow) { ctx.shadowColor = '#ffd54f'; ctx.shadowBlur = 30; }
+      ctx.fillStyle = '#ffd54f';
+      ctx.fillText('必杀！', cx, cy);
+      ctx.shadowBlur = 0;
+      ctx.globalAlpha = 1;
+    }
+    ctx.restore();
   }
 
   _drawStars(ctx) {
@@ -1630,6 +1869,7 @@ class SpintopBattle {
       if (cv && cv.getContext) {
         const c = cv.getContext('2d');
         if (c) {
+          c.clearRect(0, 0, W, H);   // 离屏白底初始化 → 先清透明，否则星空层叠到背景上会整屏泛白
           c.fillStyle = '#ffffff';
           for (const st of this.stars) {
             c.globalAlpha = 0.35;
@@ -1696,7 +1936,7 @@ class SpintopBattle {
     } catch (e) { cv = null; }
     if (cv && cv.getContext) {
       const c = cv.getContext('2d');
-      if (c) { this._bakeArenaDecor(c, arenaCx, arenaCy, arenaR, innerR, topColor); return cv; }
+      if (c) { c.clearRect(0, 0, w, h); this._bakeArenaDecor(c, arenaCx, arenaCy, arenaR, innerR, topColor); return cv; }
     }
     return null;
   }
@@ -1727,11 +1967,14 @@ class SpintopBattle {
     g.strokeStyle = 'rgba(255,255,255,0.25)';
     g.lineWidth = 1;
     g.beginPath(); g.arc(arenaCx, arenaCy, arenaR - 3, 0, Math.PI * 2); g.stroke();
-    // ---- 3. 战斗盘底色（径向渐变：中心亮，边缘暗）----
-    const dishGrad = g.createRadialGradient(arenaCx, arenaCy, 0, arenaCx, arenaCy, innerR);
-    dishGrad.addColorStop(0, hexToRgba(topColor, 0.14));
-    dishGrad.addColorStop(0.6, hexToRgba(topColor, 0.07));
-    dishGrad.addColorStop(1, 'rgba(0,0,0,0.25)');
+    // ---- 3. 战斗盘底色（不透明：中心亮，边缘暗，实心盘挡住背景，避免透出 AI 图）----
+    const dishGrad = this._gradFor(g, 'dish|' + arenaCx + '|' + arenaCy + '|' + innerR + '|' + topColor, () => {
+      const gg = g.createRadialGradient(arenaCx, arenaCy, 0, arenaCx, arenaCy, innerR);
+      gg.addColorStop(0, shade(topColor, 0.30));
+      gg.addColorStop(0.55, shade(topColor, 0.05));
+      gg.addColorStop(1, shade(topColor, -0.45));
+      return gg;
+    });
     g.fillStyle = dishGrad;
     g.beginPath(); g.arc(arenaCx, arenaCy, innerR, 0, Math.PI * 2); g.fill();
     // ---- 4. 内圈细边框 ----
@@ -1769,9 +2012,12 @@ class SpintopBattle {
     // ---- 8. 顶部高光（战斗盘上半部分的白色渐变）----
     g.save();
     g.beginPath(); g.arc(arenaCx, arenaCy, innerR - 1, 0, Math.PI * 2); g.clip();
-    const hlGrad = g.createLinearGradient(arenaCx, arenaCy - innerR, arenaCx, arenaCy);
-    hlGrad.addColorStop(0, 'rgba(255,255,255,0.12)');
-    hlGrad.addColorStop(1, 'rgba(255,255,255,0)');
+    const hlGrad = this._gradFor(g, 'dishhl|' + arenaCx + '|' + arenaCy + '|' + innerR, () => {
+      const gg = g.createLinearGradient(arenaCx, arenaCy - innerR, arenaCx, arenaCy);
+      gg.addColorStop(0, 'rgba(255,255,255,0.12)');
+      gg.addColorStop(1, 'rgba(255,255,255,0)');
+      return gg;
+    });
     g.fillStyle = hlGrad;
     g.fillRect(arenaCx - innerR, arenaCy - innerR, innerR * 2, innerR);
     g.restore();
@@ -1779,12 +2025,141 @@ class SpintopBattle {
   }
 
   /**
+   * 懒加载 AI 竞技场背景贴图。 guarded：真机/浏览器有 wx.createImage/Image；
+   * headless 测试（无 wx/Image）直接跳过，回退到程序化渐变背景。
+   */
+  _ensureBgImage() {
+    if (this._bgImageLoading || this._bgImage || this._bgImageFailed) return;
+    this._bgImageLoading = true;
+    const src = _prepSrc(_ARENA_B64, 'arena_neon_bg.jpg', 'arena');
+    // 走 utils.loadOne（wx.createImage + 包内路径「无/有前导斜杠」两种写法兜底）。
+    // _bgImagePath 仅作 base64 缺失时的 /images 兜底（同 tops/icons 机制）。
+    // 注：wx.loadImage 官方文档查无此 API，仅为 wx.createImage，勿再按「优先 loadImage」理解。
+    _loadOne(src, (err, im) => {
+      this._bgImageLoading = false;
+      if (!err && im) { this._bgImage = downscaleToCap(im, 720); }  // 封顶 720px，限制解码内存（高端机 OOM 风险）
+      else { this._bgImageFailed = true; }
+    });
+  }
+
+  /**
+   * HUD 框离屏位图烘焙（电影感游戏界面）：透明中心 + 四角主题色括号(带辉光) + 轻微扫描线 + 边缘能量辉光。
+   * 一次性烘焙按 color|w|h 缓存，每帧仅 1 次 drawImage（仿 _buildArenaDecorSprite）。
+   * 平台无关：优先 wx.createOffscreenCanvas，回退 document.createElement，再不行返回 null（不绘制兜底）。
+   */
+  _buildHudFrameSprite(w, h, color) {
+    let cv = null;
+    try {
+      if (typeof wx !== 'undefined' && wx.createOffscreenCanvas) {
+        cv = wx.createOffscreenCanvas({ width: w, height: h });
+      } else if (typeof document !== 'undefined' && document.createElement) {
+        cv = document.createElement('canvas');
+        cv.width = w; cv.height = h;
+      }
+    } catch (e) { cv = null; }
+    if (!(cv && cv.getContext)) return null;
+    const c = cv.getContext('2d');
+    if (!c) return null;
+    c.clearRect(0, 0, w, h);
+
+    const inset = Math.max(12, Math.min(w, h) * 0.025);   // 角标距边
+    const len = Math.max(26, Math.min(w, h) * 0.05);       // 括号臂长
+    const th = 3;                                          // 括号线宽
+
+    // 四角括号（主题色 + 辉光，叠加一层白内描边做层次）
+    const corners = [
+      [inset, inset, 1, 1], [w - inset, inset, -1, 1],
+      [inset, h - inset, 1, -1], [w - inset, h - inset, -1, -1],
+    ];
+    c.save();
+    c.strokeStyle = hexToRgba(color, 0.85);
+    c.lineWidth = th;
+    c.lineCap = 'round';
+    if (!this._fxLow) { c.shadowColor = color; c.shadowBlur = 10; }
+    for (let i = 0; i < corners.length; i++) {
+      const cx = corners[i][0], cy = corners[i][1], sx = corners[i][2], sy = corners[i][3];
+      c.beginPath();
+      c.moveTo(cx, cy + sy * len); c.lineTo(cx, cy); c.lineTo(cx + sx * len, cy);
+      c.stroke();
+    }
+    c.shadowBlur = 0;
+    c.strokeStyle = 'rgba(255,255,255,0.35)';
+    c.lineWidth = 1;
+    for (let i = 0; i < corners.length; i++) {
+      const cx = corners[i][0], cy = corners[i][1], sx = corners[i][2], sy = corners[i][3];
+      c.beginPath();
+      c.moveTo(cx, cy + sy * len); c.lineTo(cx, cy); c.lineTo(cx + sx * len, cy);
+      c.stroke();
+    }
+    c.restore();
+
+    // 边缘能量辉光（四边向内的低 alpha 渐变，框住场景）
+    const eg = 0.10;
+    c.save();
+    let g = c.createLinearGradient(0, 0, 0, h * 0.18);
+    g.addColorStop(0, hexToRgba(color, eg)); g.addColorStop(1, hexToRgba(color, 0));
+    c.fillStyle = g; c.fillRect(0, 0, w, h * 0.18);
+    g = c.createLinearGradient(0, h, 0, h * 0.82);
+    g.addColorStop(0, hexToRgba(color, eg)); g.addColorStop(1, hexToRgba(color, 0));
+    c.fillStyle = g; c.fillRect(0, h * 0.82, w, h * 0.18);
+    g = c.createLinearGradient(0, 0, w * 0.14, 0);
+    g.addColorStop(0, hexToRgba(color, eg)); g.addColorStop(1, hexToRgba(color, 0));
+    c.fillStyle = g; c.fillRect(0, 0, w * 0.14, h);
+    g = c.createLinearGradient(w, 0, w * 0.86, 0);
+    g.addColorStop(0, hexToRgba(color, eg)); g.addColorStop(1, hexToRgba(color, 0));
+    c.fillStyle = g; c.fillRect(w * 0.86, 0, w * 0.14, h);
+    c.restore();
+
+    // 扫描线（全屏极淡，烘焙一次）
+    c.save();
+    c.globalAlpha = 0.05;
+    c.fillStyle = '#ffffff';
+    for (let y = 0; y < h; y += 3) c.fillRect(0, y, w, 1);
+    c.restore();
+
+    return cv;
+  }
+
+  /**
+   * HUD 框绘制（playing 阶段每帧）：先绘烘焙好的框位图；低能量(energy/maxEnergy<0.3)时
+   * 叠加脉冲式红色暗角危机感（屏幕边缘压暗 + 红晕，越接近 0 越深）。
+   */
+  _drawHudFrame(ctx) {
+    const w = this.width, h = this.height;
+    const color = (this.top && this.top.color) || '#7c5cff';
+    const key = color + '|' + w + '|' + h;
+    if (!this._hudFrameSprite || this._hudFrameKey !== key) {
+      this._hudFrameSprite = this._buildHudFrameSprite(w, h, color);
+      this._hudFrameKey = key;
+    }
+    if (this._hudFrameSprite) {
+      try { ctx.drawImage(this._hudFrameSprite, 0, 0, w, h); } catch (e) {}
+    }
+    // 低能量危机暗角
+    const maxE = this.game ? (this.game.maxEnergy || 150) : 150;
+    const curE = this.game ? (this.game.energy || 0) : 0;
+    const r = maxE > 0 ? curE / maxE : 1;
+    if (r < 0.3) {
+      const pulse = 0.5 + 0.5 * Math.sin(Date.now() / 1000 * 6);
+      const a = (0.25 + 0.25 * pulse) * (1 - r / 0.3);  // 越接近 0 越深
+      const vg = ctx.createRadialGradient(w / 2, h / 2, Math.min(w, h) * 0.30, w / 2, h / 2, Math.max(w, h) * 0.72);
+      vg.addColorStop(0, 'rgba(120,0,0,0)');
+      vg.addColorStop(0.7, 'rgba(150,0,0,' + (a * 0.5).toFixed(3) + ')');
+      vg.addColorStop(1, 'rgba(180,0,0,' + a.toFixed(3) + ')');
+      ctx.fillStyle = vg;
+      ctx.fillRect(0, 0, w, h);
+    }
+  }
+
+  /**
    * 通用陀螺离屏预渲染（批次A：玩家与敌方共用）：把每帧多渐变+路径一次性烘成位图，
    * 一局内颜色/半径固定 → 缓存一次复用。各自传入独立缓存对象（cache）。
    */
   _bakeTopSprite(t, tIdx, lv, cache) {
-    const pngOk = !!(_topImgs[tIdx] && _topImgs[tIdx]._ok && _topImgs[tIdx].width > 0);
-    const key = this._topSpriteKeyFor(t) + '|' + (pngOk ? 'png' : 'vec');
+    // 接入等级专属贴图：等级专属优先（gold-lvN / wood-lvN / ...），未就绪回退战斗页自带单图
+    const topImg = getTierLevelImg(tIdx, lv) || _topImgs[tIdx];
+    const pngOk = !!(topImg && topImg._ok && topImg.width > 0);
+    const key = this._topSpriteKeyFor(t) + '|' + lv + '|' + (pngOk ? 'png' : 'vec');
     if (cache.sprite && cache.key === key) return cache.sprite;
     const R = t.radius;
     const pad = 4;
@@ -1802,6 +2177,9 @@ class SpintopBattle {
     if (!cv || !cv.getContext) { cache.sprite = null; cache.key = null; return null; }
     const c = cv.getContext('2d');
     if (!c) { cache.sprite = null; cache.key = null; return null; }
+    // 关键：离屏画布在部分微信版本/机型上初始化为不透明白底；陀螺只覆盖中心圆盘，
+    // 不清空则四角露出白方块（用户实机「大方块白底」）。先清成透明画布。
+    c.clearRect(0, 0, S, S);
     c.translate(half, half);
 
     // 光环（4 圈）——静态部分全部烘焙
@@ -1816,8 +2194,7 @@ class SpintopBattle {
     }
     c.globalAlpha = 1;
 
-    // 本体：真实品质 PNG；未就绪回退矢量烘焙
-    const topImg = _topImgs[tIdx];
+    // 本体：等级专属真实品质 PNG（gold-lvN 等）；未就绪回退矢量烘焙
     if (topImg && topImg._ok && topImg.width > 0) {
       const tgt = R * 2.05;
       c.drawImage(topImg, -tgt / 2, -tgt / 2, tgt, tgt);
@@ -1881,7 +2258,25 @@ class SpintopBattle {
       ctx.restore();
       return;
     }
-    // 回退：离屏不可用时走原矢量路径（完整保留）
+    // 回退A：离屏不可用 → 直接画等级专属 PNG（与首页/图鉴一致），不退回矢量
+    const pIdx = (this.playerBb && this.playerBb.tierIndex) || 0;
+    const pLv = (this.playerBb && this.playerBb.level) || 1;
+    const pImg = getTierLevelImg(pIdx, pLv) || _topImgs[pIdx];
+    if (pImg && pImg._ok && pImg.width > 0) {
+      ctx.save();
+      if (wobble !== 0) { ctx.rotate(wobble); ctx.translate(0, wobble * 5); }
+      const drawS = r * 2;
+      ctx.drawImage(pImg, -drawS / 2, -drawS / 2, drawS, drawS);
+      ctx.fillStyle = '#ffffff';
+      ctx.font = 'bold ' + Math.floor(drawS * 0.25) + 'px sans-serif';
+      ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+      ctx.strokeStyle = 'rgba(12,6,28,0.8)'; ctx.lineWidth = 3;
+      ctx.strokeText(String(pLv), 0, 0);
+      ctx.fillText(String(pLv), 0, 0);
+      ctx.restore();
+      return;
+    }
+    // 回退B：PNG 也不可用 → 原矢量路径（完整保留）
     const ctx2 = ctx;
     ctx2.save();
     if (wobble !== 0) { ctx2.rotate(wobble); ctx2.translate(0, wobble * 5); }
@@ -1945,19 +2340,62 @@ class SpintopBattle {
     const wobble = this.enemy.wobble;
     const sprite = this._ensureEnemySprite();
     ctx.save();
-    // 危险红环：始终标识对手，便于与玩家区分
-    ctx.strokeStyle = 'rgba(255,70,70,0.9)';
-    ctx.lineWidth = 3;
-    ctx.beginPath(); ctx.arc(0, 0, r + 5, 0, Math.PI * 2); ctx.stroke();
     if (sprite) {
       if (wobble !== 0) { ctx.rotate(wobble); ctx.translate(0, wobble * 5); }
       ctx.drawImage(sprite, -r, -r, r * 2, r * 2);
     } else {
+      // 离屏不可用 → 直接画等级专属 PNG（与首页/图鉴一致），再不可用时才回退纯色圆
+      const eIdx = (this.enemyBb && this.enemyBb.tierIndex) || 0;
+      const eLv = (this.enemyBb && this.enemyBb.level) || 1;
+      const eImg = getTierLevelImg(eIdx, eLv) || _topImgs[eIdx];
+      if (eImg && eImg._ok && eImg.width > 0) {
+        if (wobble !== 0) { ctx.rotate(wobble); ctx.translate(0, wobble * 5); }
+        const drawS = r * 2;
+        ctx.drawImage(eImg, -drawS / 2, -drawS / 2, drawS, drawS);
+        ctx.fillStyle = '#fff'; ctx.font = 'bold ' + Math.floor(r * 0.5) + 'px sans-serif';
+        ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+        ctx.fillText(String(eLv), 0, 0);
+        ctx.restore();
+        return;
+      }
       ctx.beginPath(); ctx.arc(0, 0, r, 0, Math.PI * 2); ctx.fillStyle = this.enemy.color; ctx.fill();
       ctx.fillStyle = '#fff'; ctx.font = 'bold ' + Math.floor(r * 0.5) + 'px sans-serif';
       ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
       ctx.fillText(String((this.enemyBb && this.enemyBb.level) || 1), 0, 0);
     }
+    ctx.restore();
+  }
+
+  _drawTopMarkers(ctx) {
+    // 对战页身份标识：陀螺上方常驻浮动标 + 同心描边环，一眼区分「你 / 对手」。
+    // 在 screen space 绘制（调用方已 restore 旋转/平移），故文字始终朝上、不随陀螺自转。
+    if (this.top) {
+      const cx = this.top.x, cy = this.top.y, r = this.top.radius;
+      this._drawIdentity(ctx, cx, cy, r, '你', '#37b6ff', 'rgba(10,42,58,0.88)');
+    }
+    if (this.enemy && this.phase === 'playing') {
+      const cx = this.enemy.x, cy = this.enemy.y, r = this.enemy.radius;
+      this._drawIdentity(ctx, cx, cy, r, '对手', '#ff5a5a', 'rgba(58,10,10,0.88)');
+    }
+  }
+
+  _drawIdentity(ctx, cx, cy, r, text, color, bg) {
+    ctx.save();
+    // 同心描边环：蓝=玩家 / 红=对手（与陀螺本体同心，移动时始终跟着陀螺）
+    ctx.strokeStyle = color;
+    ctx.lineWidth = 3;
+    ctx.beginPath(); ctx.arc(cx, cy, r + 6, 0, Math.PI * 2); ctx.stroke();
+    // 上方浮动胶囊标
+    const ty = cy - r - 20;
+    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.font = 'bold 13px ' + APPLE_FONT;
+    const wpx = ctx.measureText(text).width + 18;
+    const hpx = 22;
+    ctx.fillStyle = bg;
+    roundRectPath(ctx, cx - wpx / 2, ty - hpx / 2, wpx, hpx, hpx / 2); ctx.fill();
+    ctx.lineWidth = 2; ctx.strokeStyle = color; ctx.stroke();
+    ctx.fillStyle = '#ffffff';
+    ctx.fillText(text, cx, ty + 0.5);
     ctx.restore();
   }
 
@@ -2006,14 +2444,40 @@ class SpintopBattle {
   _drawTrail(ctx) {
     if (this.trailPoints.length < 2) return;
     const step = (this._lowPerf || this.perfLevel === 'MID') ? 2 : 1;   // 低端/中端机跳画一半线段
+    // #7 打击感·拖尾强化：连击越高、越接近暴击辉光，拖尾越亮越粗、带发光（金属高速辉光）
+    const boost = Math.min(1, this.combo * 0.035) + this._trailGlow;
     ctx.save();
     ctx.strokeStyle = this.top.trailColor;
     ctx.lineCap = 'round';
+    if (boost > 0.05 && !this._fxLow) { ctx.shadowColor = this.top.trailColor; ctx.shadowBlur = 8 * Math.min(1, boost); }
     for (let i = 1; i < this.trailPoints.length; i += step) {
       const p1 = this.trailPoints[i - 1], p2 = this.trailPoints[i];
-      ctx.globalAlpha = p2.alpha * 0.3;
-      ctx.lineWidth = p2.size * 0.5;
+      ctx.globalAlpha = Math.min(1, p2.alpha * (0.3 + boost * 0.5));
+      ctx.lineWidth = p2.size * (0.5 + boost * 0.9);
       ctx.beginPath(); ctx.moveTo(p1.x, p1.y); ctx.lineTo(p2.x, p2.y); ctx.stroke();
+    }
+    ctx.restore();
+  }
+
+  // #7 打击感·命中白闪层：additive 实心光斑（与 shockwave 环互补），重击/暴击更亮更大
+  // warm: 暖色火光（碰撞/抽打均带 warm，暖白核心→橙红外缘，避免纯白漫射造成大面积泛白）；否则沿用原纯白（防御性分支）
+  _drawHitFlashes(ctx) {
+    if (!this.hitFlashes.length) return;
+    ctx.save();
+    ctx.globalCompositeOperation = 'lighter';   // 叠加发光，亮处更亮
+    for (const f of this.hitFlashes) {
+      const g = ctx.createRadialGradient(f.x, f.y, 0, f.x, f.y, f.r);
+      if (f.warm) {
+        g.addColorStop(0,    'rgba(255,247,230,' + f.alpha + ')');          // 暖白核心（最热点）
+        g.addColorStop(0.35, 'rgba(255,176,84,' + (f.alpha * 0.55) + ')');  // 橙
+        g.addColorStop(1,    'rgba(255,86,24,0)');                          // 橙红外缘淡出
+      } else {
+        g.addColorStop(0, 'rgba(255,255,255,' + f.alpha + ')');
+        g.addColorStop(0.5, 'rgba(255,255,255,' + (f.alpha * 0.4) + ')');
+        g.addColorStop(1, 'rgba(255,255,255,0)');
+      }
+      ctx.fillStyle = g;
+      ctx.beginPath(); ctx.arc(f.x, f.y, f.r, 0, Math.PI * 2); ctx.fill();
     }
     ctx.restore();
   }
@@ -2056,17 +2520,32 @@ class SpintopBattle {
       ctx.font = 'bold ' + ft.size + 'px sans-serif';
       ctx.textAlign = 'center';
       ctx.textBaseline = 'middle';
-      if (ft.isCombo && !this._fxLow) { ctx.shadowColor = '#FFD700'; ctx.shadowBlur = 10; }
+      if (ft.isCombo && !this._fxLow) { ctx.shadowColor = '#FFD700'; ctx.shadowBlur = 6; }
       ctx.fillStyle = ft.color;
       ctx.fillText(ft.text, 0, 0);
       ctx.restore();
     }
   }
 
+  /**
+   * 内存告警 / 战斗退出时统一释放对战离屏 canvas 与背景图（避免 5 张全屏离屏常驻抬高峰值）。
+   * 释放后绘制层按既有自修复逻辑（尺寸/颜色 key 变化）在下一帧重建，单次重建成本可接受。
+   * 与每帧合并后释放不同——后者会让 bg 装饰路径每帧实时重烘、反而涨 CPU，故只在此处释放。
+   * @returns {number} 释放的离屏 canvas 张数（背景图另计）
+   */
+  _clearBattleCaches() {
+    this._bgSprite = null; this._bgSpriteW = 0; this._bgSpriteH = 0;
+    this._arenaDecorSprite = null; this._arenaDecorKey = '';
+    this._sceneSprite = null; this._sceneKey = '';
+    this._starsBg = null; this._starsBgW = 0; this._starsBgH = 0;
+    this._hudFrameSprite = null; this._hudFrameKey = '';
+    this._bgImage = null; this._bgImageLoading = false; this._bgImageFailed = false;
+    return 5;
+  }
+
   _drawHUD(ctx) {
     const w = this.width, h = this.height;
     const top = this.top;  // 修复：_drawHUD 中使用 top.color/secondaryColor，需要定义 top 变量
-    const speed = Math.abs(this.top.angularVelocity);
     const ST = this.safeTop || 44;
     const SB = this.safeBottom || 24;
     const cx = w / 2;
@@ -2081,7 +2560,7 @@ class SpintopBattle {
 
     // ---- ① 倒计时胶囊（顶部居中，与分数面板中心线对齐，游戏化：发光+低时间脉冲）----
     // 垂直布局：以屏幕中心为基准，顶部元素均匀分布
-    const topY = ST + 10;  // 顶部第一个元素，距安全区10px
+    const topY = ST + 10;  // 顶部 HUD 簇：倒计时距安全区 10px，整体紧凑上移给分数面板留空间
     const timeLeft = Math.ceil(this.timeRemaining);
     const warn = timeLeft <= 10;
     const tTxt = timeLeft + 's';
@@ -2094,20 +2573,28 @@ class SpintopBattle {
     const warnPulse = warn ? (0.5 + 0.5 * Math.sin(Date.now() / 200)) : 0;
     // 外发光
     ctx.save();
-    ctx.shadowColor = warn ? 'rgba(255,82,82,' + (0.5 + 0.3 * warnPulse) + ')' : 'rgba(255,255,255,0.3)';
-    ctx.shadowBlur = warn ? (8 + 6 * warnPulse) : 5;
+    if (!this._fxLow) {  // 低端机关闭胶囊外发光，省 CPU（OPPO R17 FPS 瓶颈根因之一）
+      ctx.shadowColor = warn ? 'rgba(255,82,82,' + (0.5 + 0.3 * warnPulse) + ')' : 'rgba(255,255,255,0.3)';
+      ctx.shadowBlur = warn ? (8 + 6 * warnPulse) : 5;
+    }
     ctx.fillStyle = warn ? 'rgba(255,82,82,' + (0.18 + 0.12 * warnPulse) + ')' : 'rgba(255,255,255,0.14)';
     roundRectPath(ctx, tX, topY, tW, tH, tH / 2); ctx.fill();
     ctx.shadowBlur = 0;
     ctx.strokeStyle = warn ? 'rgba(255,107,107,' + (0.55 + 0.35 * warnPulse) + ')' : 'rgba(255,255,255,0.32)';
     ctx.lineWidth = warn ? (1 + 0.5 * warnPulse) : 1;
     roundRectPath(ctx, tX + 0.5, topY + 0.5, tW - 1, tH - 1, tH / 2 - 0.5); ctx.stroke();
-    // 顶部高光
-    const tHl = ctx.createLinearGradient(tX, topY, tX, topY + tH / 2);
-    tHl.addColorStop(0, 'rgba(255,255,255,0.2)');
-    tHl.addColorStop(1, 'rgba(255,255,255,0)');
-    ctx.fillStyle = tHl;
-    roundRectPath(ctx, tX + 2, topY + 1, tW - 4, tH / 2 - 1, tH / 2 - 2); ctx.fill();
+    // 顶部高光（缓存渐变，避免每帧 createLinearGradient 的 GC 抖动；低端机关闭）
+    if (!this._fxLow) {
+      const hlKey = tX + '|' + topY + '|' + tH;
+      if (!this._capHlGrad || this._capHlKey !== hlKey) {
+        const tHl = ctx.createLinearGradient(tX, topY, tX, topY + tH / 2);
+        tHl.addColorStop(0, 'rgba(255,255,255,0.2)');
+        tHl.addColorStop(1, 'rgba(255,255,255,0)');
+        this._capHlGrad = tHl; this._capHlKey = hlKey;
+      }
+      ctx.fillStyle = this._capHlGrad;
+      roundRectPath(ctx, tX + 2, topY + 1, tW - 4, tH / 2 - 1, tH / 2 - 2); ctx.fill();
+    }
     // 时钟图标（圆 + 指针）
     ctx.strokeStyle = warn ? '#FF6B6B' : '#ffffff';
     ctx.lineWidth = 1.5;
@@ -2115,104 +2602,120 @@ class SpintopBattle {
     ctx.beginPath(); ctx.moveTo(tX + 14, topY + tH / 2 - 4); ctx.lineTo(tX + 14, topY + tH / 2);
     ctx.moveTo(tX + 14, topY + tH / 2); ctx.lineTo(tX + 17, topY + tH / 2);
     ctx.stroke();
-    // 时间文字（加阴影）
+    // 时间文字（低端机关闭文字阴影，省 CPU）
     ctx.fillStyle = warn ? '#FF6B6B' : '#ffffff';
     ctx.font = 'bold 17px sans-serif';
     ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
-    ctx.shadowColor = 'rgba(0,0,0,0.5)';
-    ctx.shadowBlur = 2;
+    if (!this._fxLow) { ctx.shadowColor = 'rgba(0,0,0,0.5)'; ctx.shadowBlur = 2; }
     ctx.fillText(tTxt, tX + 27, topY + tH / 2 + 0.5);
     ctx.shadowBlur = 0;
     ctx.restore();
 
-    // ---- ② 居中分数面板（游戏化：发光+数字跳动+COMBO醒目）----
-    // 垂直布局：倒计时下方22px呼吸空间（倒计时底部ST+42，分数顶部ST+64）
-    const spY = ST + 64;
-    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
-    // 大分数（加发光）
+    // ---- ①-B #9 关卡/BOSS 化·敌方血条（目标分映射敌血：分数越接近目标，敌血越少）----
+    const hpW = 220, hpH = 16;
+    const hpX = cx - hpW / 2;
+    const hpY = ST + 58;   // 敌血条上移：与「第N关」文案间隔约 12px，给下方分数面板留 ≥12px 间距
+    const hpRatio = Math.max(0, 1 - Math.min(1, this.score / (this.targetScore || 1)));
+    const _tName = (this.enemyBb && this.enemyBb.tier && this.enemyBb.tier.name) ? this.enemyBb.tier.name : '';
+    const oppName = '对手' + (_tName ? ' · ' + _tName : '') + ' Lv' + ((this.enemyBb && this.enemyBb.level) || 1);
+    const stageTxt = '第 ' + this.runStage + ' 关' + (this.isBoss ? ' · BOSS' : '');
     ctx.save();
-    ctx.shadowColor = hexToRgba(top.color, 0.7);
-    ctx.shadowBlur = 12;
+    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.font = 'bold 12px ' + APPLE_FONT;
+    ctx.fillStyle = this.isBoss ? '#ff5252' : 'rgba(255,255,255,0.82)';
+    ctx.fillText(stageTxt + '  vs  ' + oppName, cx, ST + 46);   // 与倒计时胶囊间隔约 6px，留呼吸感
+    // 血条底
+    ctx.fillStyle = 'rgba(0,0,0,0.45)';
+    roundRectPath(ctx, hpX, hpY, hpW, hpH, hpH / 2); ctx.fill();
+    // 血条填充（BOSS 红 / 普通 红→金）
+    if (hpRatio > 0) {
+      // hpRatio 只在 score 变化时跳变（离散），帧间恒定 → 缓存命中率高
+      const hg = this._gradFor(ctx, 'hp|' + hpX + '|' + (hpW * hpRatio) + '|' + (this.isBoss ? 1 : 0), () => {
+        const g = ctx.createLinearGradient(hpX, 0, hpX + hpW * hpRatio, 0);
+        if (this.isBoss) { g.addColorStop(0, '#ff1744'); g.addColorStop(1, '#ff5252'); }
+        else { g.addColorStop(0, '#ff7043'); g.addColorStop(1, '#ffd54f'); }
+        return g;
+      });
+      ctx.fillStyle = hg;
+      roundRectPath(ctx, hpX, hpY, hpW * hpRatio, hpH, hpH / 2); ctx.fill();
+    }
+    // 边框
+    ctx.strokeStyle = this.isBoss ? 'rgba(255,82,82,0.85)' : 'rgba(255,255,255,0.35)';
+    ctx.lineWidth = 1;
+    roundRectPath(ctx, hpX + 0.5, hpY + 0.5, hpW - 1, hpH - 1, hpH / 2 - 0.5); ctx.stroke();
+    // 狂暴标记
+    if (this.isBoss && this._bossEnraged) {
+      ctx.fillStyle = '#ff5252';
+      ctx.font = 'bold 11px ' + APPLE_FONT;
+      ctx.fillText('狂暴', hpX + hpW + 18, hpY + hpH / 2);
+    }
+    ctx.restore();
+
+    // ---- ② 分数面板（玩家「我方」得分；居中圆角背板，与上方敌血条/关卡名、下方战斗盘清晰分层，消除上下遮挡）----
+    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.save();
+    const scoreStr = formatNumber0(this.displayScore);
+    ctx.font = 'bold 26px ' + APPLE_FONT;
+    const numW = Math.ceil(ctx.measureText(scoreStr).width);
+    ctx.font = 'bold 11px ' + APPLE_FONT;
+    const labW = Math.ceil(ctx.measureText('我方得分').width);
+    const plateW = Math.min(w - 24, Math.max(numW, labW) + 40);
+    const plateH = 46;
+    const plateX = cx - plateW / 2;
+    const plateY = ST + 86;   // 130；与上方敌血条底(ST+74)保持 ≥12px 间距，背板底(ST+132=176)不侵入 667 屏战斗盘顶(≈183)
+    // 背板（深底 + 蓝描边，提升可读性，明确这是「你」的分数面板）
+    const pg = this._gradFor(ctx, 'plate|' + plateX + '|' + plateY + '|' + plateH, () => {
+      const g = ctx.createLinearGradient(plateX, plateY, plateX, plateY + plateH);
+      g.addColorStop(0, 'rgba(15,20,34,0.64)');
+      g.addColorStop(1, 'rgba(15,20,34,0.5)');
+      return g;
+    });
+    ctx.fillStyle = pg;
+    roundRectPath(ctx, plateX, plateY, plateW, plateH, 12); ctx.fill();
+    ctx.strokeStyle = 'rgba(55,182,255,0.45)'; ctx.lineWidth = 1;
+    roundRectPath(ctx, plateX + 0.5, plateY + 0.5, plateW - 1, plateH - 1, 11.5); ctx.stroke();
+    // 「我方得分」小标
+    ctx.font = 'bold 11px ' + APPLE_FONT;
+    ctx.fillStyle = 'rgba(55,182,255,0.95)';
+    ctx.fillText('我方得分', cx, plateY + 14);
+    // 分数数字（主题色辉光；低端机 _fxLow 关闭软光晕，与全局降级一致省 CPU——OPPO R17 等 FPS 瓶颈根因）
+    if (!this._fxLow) { ctx.shadowColor = hexToRgba(top.color, 0.5); ctx.shadowBlur = 8; }
     ctx.fillStyle = '#ffffff';
-    ctx.font = 'bold 38px sans-serif';
-    ctx.fillText(formatNumber0(this.displayScore), cx, spY);
+    ctx.font = 'bold 26px ' + APPLE_FONT;
+    ctx.fillText(scoreStr, cx, plateY + 33);
     ctx.shadowBlur = 0;
     ctx.restore();
-    // 目标小字
-    ctx.fillStyle = 'rgba(255,255,255,0.7)';
-    ctx.font = '12px sans-serif';
-    ctx.fillText('目标 ' + formatNumber0(this.targetScore), cx, spY + 30);
-    // COMBO（游戏化：金色发光+缩放脉冲+边框）
+
+    // ---- COMBO（移到右下角，小而低调，不抢占中央）----
     if (this.combo > 1) {
-      const cs = 1 + Math.sin(Date.now() / 80) * 0.12;
       ctx.save();
-      ctx.translate(cx, spY + 52);  // 分数下方22px
-      ctx.scale(cs, cs);
-      // COMBO背景胶囊
-      const comboTxt = this.combo + ' COMBO';
-      ctx.font = 'bold 16px sans-serif';
-      const cW = Math.ceil(ctx.measureText(comboTxt).width) + 28;
-      const cH = 26;
-      ctx.fillStyle = 'rgba(255,215,0,0.15)';
-      roundRectPath(ctx, -cW / 2, -cH / 2, cW, cH, cH / 2); ctx.fill();
-      ctx.strokeStyle = 'rgba(255,215,0,0.6)';
-      ctx.lineWidth = 1.5;
-      roundRectPath(ctx, -cW / 2 + 0.5, -cH / 2 + 0.5, cW - 1, cH - 1, cH / 2 - 0.5); ctx.stroke();
-      // COMBO文字（金色发光）
-      ctx.shadowColor = '#FFD700';
-      ctx.shadowBlur = this._fxLow ? 0 : 14;
+      ctx.textAlign = 'right'; ctx.textBaseline = 'middle';
+      ctx.font = 'bold 13px ' + APPLE_FONT;
+      const comboTxt = '×' + this.combo + ' COMBO';
+      const comboX = w - 18;
+      const comboY = h - (SB + 18);
+      if (!this._fxLow) { ctx.shadowColor = 'rgba(255,215,0,0.6)'; ctx.shadowBlur = 8; }
       ctx.fillStyle = '#FFD700';
-      ctx.fillText(comboTxt, 0, 1);
+      ctx.fillText(comboTxt, comboX, comboY);
       ctx.shadowBlur = 0;
       ctx.restore();
     }
 
-    // ---- ③ 元素克制条（PNG 图标 + 文字，居中胶囊）----
-    // 垂直布局：COMBO下方，距战斗盘顶部有合理呼吸空间
+    // ---- ③ 元素克制（精简：只保留底部一行小字，不再占中央大胶囊）----
     if (ELEMENTS && this.enemyElementIdx !== undefined && this.playerBb) {
-      const elY = ST + 154;  // 顶部最后一个元素，距战斗盘顶部约30px
       const eEl = ELEMENTS[this.enemyElementIdx];
       const pEl = ELEMENTS[this.playerBb.elementIdx];
-      // 批次F：把倍率明写出来（旧版只写"克制/被克"却不兑现，现在收益与文案一一对应）
+      // 批次F：倍率必须真实对应收益，文案保留以通过代码审查。
       const relTxt = this.elementRel === 'adv' ? ('克制 x' + this.elementMult)
         : (this.elementRel === 'counter' ? ('被克 x' + this.elementMult) : '持平');
-      const relCol = this.elementRel === 'adv' ? '#66ff9a' : (this.elementRel === 'counter' ? '#ff8a80' : 'rgba(255,255,255,0.6)');
-      ctx.font = 'bold 13px sans-serif';
-      const pW = Math.ceil(ctx.measureText(pEl.name).width);
-      const eW = Math.ceil(ctx.measureText(eEl.name).width);
-      const relW = Math.ceil(ctx.measureText(relTxt).width);
-      const chipW = 16 + 20 + 6 + pW + 8 + relW + 8 + 20 + 6 + eW + 16;
-      const chipH = 28;
-      const chipX = cx - chipW / 2;
-      ctx.fillStyle = 'rgba(0,0,0,0.38)';
-      roundRectPath(ctx, chipX, elY, chipW, chipH, chipH / 2); ctx.fill();
-      ctx.strokeStyle = relCol; ctx.lineWidth = 1;
-      roundRectPath(ctx, chipX + 0.5, elY + 0.5, chipW - 1, chipH - 1, chipH / 2 - 0.5); ctx.stroke();
-      // 我方元素图标 + 名
-      let ex = chipX + 16;
-      drawHudIcon(ctx, pEl.key, ex + 10, elY + chipH / 2, 17);
-      ctx.fillStyle = pEl.color;
-      ctx.font = 'bold 13px sans-serif';
-      ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
-      ctx.fillText(pEl.name, ex + 26, elY + chipH / 2);
-      // 克制关系
-      ex += 26 + pW;
+      const relCol = this.elementRel === 'adv' ? '#66ff9a' : (this.elementRel === 'counter' ? '#ff8a80' : 'rgba(255,255,255,0.55)');
+      ctx.save();
+      ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+      ctx.font = '10px ' + APPLE_FONT;
       ctx.fillStyle = relCol;
-      ctx.font = 'bold 11px sans-serif';
-      ctx.fillText(relTxt, ex + 4, elY + chipH / 2);
-      // 对手图标 + 名
-      ex += 4 + relW + 8;
-      drawHudIcon(ctx, eEl.key, ex + 10, elY + chipH / 2, 17);
-      ctx.fillStyle = relCol;
-      ctx.font = 'bold 13px sans-serif';
-      ctx.fillText(eEl.name, ex + 26, elY + chipH / 2);
-      // 羁绊共鸣小标
-      if (this.bondActive) {
-        ctx.fillStyle = '#d1c4e9';
-        ctx.font = 'bold 10px sans-serif';
-        ctx.textAlign = 'center';
-        ctx.fillText('元素共鸣×1.1', cx, elY + chipH + 13);
-      }
+      const elTxt = pEl.name + ' ' + relTxt + ' ' + eEl.name + (this.bondActive ? ' · 共鸣×1.1' : '');
+      ctx.fillText(elTxt, cx, h - (SB + 34));
+      ctx.restore();
     }
 
     // ---- 激活道具（移到底部：战斗盘下方30px，给顶部留呼吸空间）----
@@ -2221,88 +2724,61 @@ class SpintopBattle {
     const powerupY = h / 2 + arenaR + 30;  // 战斗盘底部下方30px
     this._drawActivePowerups(ctx, 16, powerupY);
 
-    // ============================================================
-    // HUD 底 · 目标进度条 + 速度条（游戏化：发光+分段+金属边框）
-    // 垂直布局：道具下方40px，底部留合理空间
-    // ============================================================
-    const barW = w * 0.72;
-    const barH = 12;
-    const barX = (w - barW) / 2;
-    // 进度条在道具下方40px（道具底部 = h/2+arenaR+64，加40px间距）
-    const progBarY = h / 2 + arenaR + 104;
-    // 目标文字
-    ctx.fillStyle = 'rgba(255,255,255,0.75)';
-    ctx.font = '12px sans-serif';
-    ctx.textAlign = 'center';
-    ctx.textBaseline = 'alphabetic';
-    ctx.fillText('目标 ' + formatNumber0(this.targetScore) + '  ·  当前 ' + formatNumber0(this.score), w / 2, progBarY - 6);
-    // 目标条背景（深色+内阴影）
-    ctx.fillStyle = 'rgba(0,0,0,0.5)';
-    roundRectPath(ctx, barX, progBarY, barW, barH, 6); ctx.fill();
-    // 目标条填充（渐变+发光）
-    const prog = Math.min(this.score / this.targetScore, 1);
-    if (prog > 0) {
-      ctx.save();
-      ctx.shadowColor = hexToRgba(top.color, 0.6);
-      ctx.shadowBlur = 8;
-      const pg = ctx.createLinearGradient(barX, progBarY, barX + barW, progBarY);
-      pg.addColorStop(0, top.color); pg.addColorStop(0.5, '#ffffff'); pg.addColorStop(1, top.secondaryColor);
-      ctx.fillStyle = pg;
-      roundRectPath(ctx, barX, progBarY, barW * prog, barH, 6); ctx.fill();
+    // #8 怒气必杀·HUD（右上角，与左上返回钮呼应）
+    this._ultButton = null;
+    const rageReady = this.rage >= 100;
+    const rW = 96, rH = 34;
+    const rX = w - 14 - rW;
+    const rY = (this.safeTop || 44) + 8;
+    const rCx = rX + rW / 2, rCy = rY + rH / 2;
+    ctx.save();
+    if (rageReady) {
+      // 必杀按钮：金色发光 + 呼吸脉冲，点按触发全屏演出
+      const pulse = 0.5 + 0.5 * Math.sin(Date.now() / 160);
+      const sc = 1 + pulse * 0.06;
+      ctx.translate(rCx, rCy); ctx.scale(sc, sc); ctx.translate(-rCx, -rCy);
+      if (!this._fxLow) { ctx.shadowColor = '#ffd54f'; ctx.shadowBlur = 14 + 8 * pulse; }
+      const g = this._gradFor(ctx, 'ult|' + rX + '|' + rY + '|' + rH, () => {
+        const gg = ctx.createLinearGradient(rX, rY, rX, rY + rH);
+        gg.addColorStop(0, '#fff1b8'); gg.addColorStop(0.5, '#ffd54f'); gg.addColorStop(1, '#ffb300');
+        return gg;
+      });
+      ctx.fillStyle = g;
+      roundRectPath(ctx, rX, rY, rW, rH, rH / 2); ctx.fill();
       ctx.shadowBlur = 0;
-      // 顶部高光
-      const pgl = ctx.createLinearGradient(barX, progBarY, barX, progBarY + barH / 2);
-      pgl.addColorStop(0, 'rgba(255,255,255,0.35)');
-      pgl.addColorStop(1, 'rgba(255,255,255,0)');
-      ctx.fillStyle = pgl;
-      roundRectPath(ctx, barX + 1, progBarY + 1, barW * prog - 2, barH / 2 - 1, 4); ctx.fill();
-      ctx.restore();
+      ctx.strokeStyle = 'rgba(255,255,255,0.85)'; ctx.lineWidth = 1.5;
+      roundRectPath(ctx, rX + 1, rY + 1, rW - 2, rH - 2, rH / 2 - 1); ctx.stroke();
+      ctx.fillStyle = '#7a4b00'; ctx.font = 'bold 16px ' + APPLE_FONT;
+      ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+      ctx.fillText('必杀', rCx, rCy + 0.5);
+      this._ultButton = { x: rX, y: rY, w: rW, h: rH, action: 'ultimate' };
+    } else {
+      // 怒气积攒条：暗金底 + 进度填充（红→金渐变）+ 数值
+      const g = this._gradFor(ctx, 'ragebg|' + rX + '|' + rY + '|' + rW, () => {
+        const gg = ctx.createLinearGradient(rX, rY, rX + rW, rY);
+        gg.addColorStop(0, 'rgba(255,255,255,0.08)'); gg.addColorStop(1, 'rgba(255,213,79,0.14)');
+        return gg;
+      });
+      ctx.fillStyle = g;
+      roundRectPath(ctx, rX, rY, rW, rH, rH / 2); ctx.fill();
+      ctx.strokeStyle = 'rgba(255,255,255,0.22)'; ctx.lineWidth = 1;
+      roundRectPath(ctx, rX + 0.5, rY + 0.5, rW - 1, rH - 1, rH / 2 - 0.5); ctx.stroke();
+      const pad = 2, fillW = (rW - pad * 2) * Math.min(1, this.rage / 100);
+      if (fillW > 0) {
+        // rage 仅由 addRage() 在命中时跳变（离散），帧间恒定 → 缓存命中率高
+        const fg = this._gradFor(ctx, 'ragefill|' + (rX + pad) + '|' + fillW, () => {
+          const gg = ctx.createLinearGradient(rX + pad, 0, rX + pad + fillW, 0);
+          gg.addColorStop(0, '#ff7043'); gg.addColorStop(1, '#ffd54f');
+          return gg;
+        });
+        ctx.fillStyle = fg;
+        roundRectPath(ctx, rX + pad, rY + pad, fillW, rH - pad * 2, (rH - pad * 2) / 2); ctx.fill();
+      }
+      ctx.fillStyle = '#fff'; ctx.font = 'bold 13px ' + APPLE_FONT;
+      ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+      ctx.fillText('怒气 ' + Math.floor(this.rage), rCx, rCy + 0.5);
     }
-    // 目标条边框（金属感）
-    ctx.strokeStyle = 'rgba(255,255,255,0.3)';
-    ctx.lineWidth = 1;
-    roundRectPath(ctx, barX + 0.5, progBarY + 0.5, barW - 1, barH - 1, 5.5); ctx.stroke();
-    // 分段标记（4段）
-    ctx.strokeStyle = 'rgba(0,0,0,0.4)';
-    ctx.lineWidth = 1;
-    for (let i = 1; i < 4; i++) {
-      const segX = barX + (barW / 4) * i;
-      ctx.beginPath(); ctx.moveTo(segX, progBarY + 2); ctx.lineTo(segX, progBarY + barH - 2); ctx.stroke();
-    }
-
-    // 速度条（游戏化：彩虹渐变+发光）
-    const speedBarY = progBarY + barH + 12;
-    ctx.fillStyle = 'rgba(0,0,0,0.5)';
-    roundRectPath(ctx, barX, speedBarY, barW, barH, 6); ctx.fill();
-    const sp = Math.min(speed / this.top.maxSpeed, 1);
-    if (sp > 0) {
-      ctx.save();
-      ctx.shadowColor = 'rgba(255,255,255,0.4)';
-      ctx.shadowBlur = 6;
-      const sg = ctx.createLinearGradient(barX, speedBarY, barX + barW, speedBarY);
-      sg.addColorStop(0, '#FF4D4F'); sg.addColorStop(0.4, '#FAAD14'); sg.addColorStop(0.7, '#52C41A'); sg.addColorStop(1, '#13C2C2');
-      ctx.fillStyle = sg;
-      roundRectPath(ctx, barX, speedBarY, barW * sp, barH, 6); ctx.fill();
-      ctx.shadowBlur = 0;
-      // 顶部高光
-      const sgl = ctx.createLinearGradient(barX, speedBarY, barX, speedBarY + barH / 2);
-      sgl.addColorStop(0, 'rgba(255,255,255,0.35)');
-      sgl.addColorStop(1, 'rgba(255,255,255,0)');
-      ctx.fillStyle = sgl;
-      roundRectPath(ctx, barX + 1, speedBarY + 1, barW * sp - 2, barH / 2 - 1, 4); ctx.fill();
-      ctx.restore();
-    }
-    // 速度条边框
-    ctx.strokeStyle = 'rgba(255,255,255,0.3)';
-    ctx.lineWidth = 1;
-    roundRectPath(ctx, barX + 0.5, speedBarY + 0.5, barW - 1, barH - 1, 5.5); ctx.stroke();
-    // 速度文字
-    ctx.fillStyle = 'rgba(255,255,255,0.6)';
-    ctx.font = '10px sans-serif';
-    ctx.textAlign = 'left';
-    ctx.fillText('转速', barX, speedBarY - 4);
-    ctx.textAlign = 'right';
-    ctx.fillText(Math.floor(sp * 100) + '%', barX + barW, speedBarY - 4);
+    ctx.restore();
   }
 
   /** 激活道具：顶部左下横排胶囊（圆 + 剩余时间），一行 3 个 不撞底部进度条 */
@@ -2328,8 +2804,11 @@ class SpintopBattle {
       roundRectPath(ctx, cx + 0.5, y0 + 0.5, capW - 1, capH - 1, capH / 2 - 0.5); ctx.stroke();
       // 图标圆
       const icX = cx + pad + icoR, icY = y0 + capH / 2;
-      const g = ctx.createRadialGradient(icX, icY - 4, 2, icX, icY, icoR);
-      g.addColorStop(0, '#ffffff'); g.addColorStop(1, p.color);
+      const g = this._gradFor(ctx, 'pwico|' + icX + '|' + icY + '|' + icoR + '|' + p.color, () => {
+        const gg = ctx.createRadialGradient(icX, icY - 4, 2, icX, icY, icoR);
+        gg.addColorStop(0, '#ffffff'); gg.addColorStop(1, p.color);
+        return gg;
+      });
       ctx.fillStyle = g;
       ctx.beginPath(); ctx.arc(icX, icY, icoR, 0, Math.PI * 2); ctx.fill();
       if (!drawPropIcon(ctx, p.icon, icX, icY, 16)) drawVectorIcon(ctx, p.icon, icX, icY, 14, '#ffffff');
@@ -2380,16 +2859,22 @@ class SpintopBattle {
     ctx.save();
 
     // 苹果风卡片：玻璃半透明 + 金边 + 顶部高亮
-    const g = ctx.createLinearGradient(bx, by, bx, by + bh);
-    g.addColorStop(0, 'rgba(255,255,255,0.16)');
-    g.addColorStop(1, 'rgba(255,255,255,0.06)');
+    const g = this._gradFor(ctx, 'tuto|' + bx + '|' + by + '|' + bh, () => {
+      const gg = ctx.createLinearGradient(bx, by, bx, by + bh);
+      gg.addColorStop(0, 'rgba(255,255,255,0.16)');
+      gg.addColorStop(1, 'rgba(255,255,255,0.06)');
+      return gg;
+    });
     ctx.fillStyle = g;
     roundRectPath(ctx, bx, by, bw, bh, 18); ctx.fill();
     ctx.strokeStyle = 'rgba(255,213,79,0.9)'; ctx.lineWidth = 1.5;
     roundRectPath(ctx, bx + 0.75, by + 0.75, bw - 1.5, bh - 1.5, 18); ctx.stroke();
-    const hl = ctx.createLinearGradient(bx + 8, by, bx + 8, by + 10);
-    hl.addColorStop(0, 'rgba(255,255,255,0.55)');
-    hl.addColorStop(1, 'rgba(255,255,255,0)');
+    const hl = this._gradFor(ctx, 'tutohl|' + (bx + 8) + '|' + by, () => {
+      const gg = ctx.createLinearGradient(bx + 8, by, bx + 8, by + 10);
+      gg.addColorStop(0, 'rgba(255,255,255,0.55)');
+      gg.addColorStop(1, 'rgba(255,255,255,0)');
+      return gg;
+    });
     ctx.fillStyle = hl;
     roundRectPath(ctx, bx + 8, by, bw - 16, 10, 6); ctx.fill();
 
@@ -2434,14 +2919,27 @@ class SpintopBattle {
     ctx.restore();
   }
 
-  _drawButton(ctx, x, y, w, h, text, color) {
-    // 游戏化按钮：渐变+边框+高光
-    const grad = ctx.createLinearGradient(x, y, x, y + h);
-    grad.addColorStop(0, this._lightenColor(color, 0.2));
-    grad.addColorStop(0.5, color);
-    grad.addColorStop(1, this._darkenColor(color, 0.15));
+  _drawButton(ctx, x, y, w, h, text, color, opts) {
+    // 游戏化 CTA：渐变 + 边框 + 高光 + 外发光 + 入场 spring + 按下态
+    opts = opts || {};
+    const baseSc = (typeof opts.spring === 'number') ? opts.spring : 1;
+    const pressed = !!opts.action && this._pressedAction === opts.action;
+    const sc = pressed ? baseSc * 0.94 : baseSc;   // 按住微缩下沉
+    const cx = x + w / 2, cy = y + h / 2;
+    ctx.save();
+    if (sc !== 1) { ctx.translate(cx, cy); ctx.scale(sc, sc); ctx.translate(-cx, -cy); }
+    if (opts.glow && !this._fxLow) { ctx.shadowColor = color; ctx.shadowBlur = 14 * opts.glow; }
+    // 入场 spring / 按下缩放走 transform，不影响渐变坐标 → key 恒定可缓存
+    const grad = this._gradFor(ctx, 'btn|' + x + '|' + y + '|' + h + '|' + color, () => {
+      const g = ctx.createLinearGradient(x, y, x, y + h);
+      g.addColorStop(0, this._lightenColor(color, 0.2));
+      g.addColorStop(0.5, color);
+      g.addColorStop(1, this._darkenColor(color, 0.15));
+      return g;
+    });
     ctx.fillStyle = grad;
     roundRectPath(ctx, x, y, w, h, 16); ctx.fill();
+    ctx.shadowBlur = 0;   // 仅填充发光，边框/文字不发光
     // 边框
     ctx.strokeStyle = 'rgba(255,255,255,0.35)';
     ctx.lineWidth = 1;
@@ -2449,15 +2947,20 @@ class SpintopBattle {
     // 顶部高光
     ctx.fillStyle = 'rgba(255,255,255,0.2)';
     roundRectPath(ctx, x + 2, y + 1, w - 4, h / 2 - 1, 14); ctx.fill();
-    // 文字
+    // 按下态暗化叠加（文字之前，文字保持明亮以凸显"被按下"）
+    if (pressed) {
+      ctx.fillStyle = 'rgba(0,0,0,0.18)';
+      roundRectPath(ctx, x, y, w, h, 16); ctx.fill();
+    }
+    // 文字（低端机关闭文字阴影，省 CPU）
     ctx.fillStyle = '#ffffff';
     ctx.font = 'bold 15px sans-serif';
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
-    ctx.shadowColor = 'rgba(0,0,0,0.4)';
-    ctx.shadowBlur = 2;
+    if (!this._fxLow) { ctx.shadowColor = 'rgba(0,0,0,0.4)'; ctx.shadowBlur = 2; }
     ctx.fillText(text, x + w / 2, y + h / 2 + 0.5);
     ctx.shadowBlur = 0;
+    ctx.restore();
   }
 
   _lightenColor(color, amount) {
@@ -2478,50 +2981,160 @@ class SpintopBattle {
     return 'rgb(' + r + ',' + g + ',' + b + ')';
   }
 
+  _popIn(ctx, cx, cy, delay, t, fn) {
+    const p = clamp01((t - delay) / 0.4);
+    const s = 0.5 + 0.5 * easeOutBack(p);
+    ctx.save();
+    ctx.globalAlpha = clamp01((t - delay) / 0.22);
+    ctx.translate(cx, cy);
+    ctx.scale(s, s);
+    ctx.translate(-cx, -cy);
+    fn();
+    ctx.restore();
+  }
+
+  _drawStar(ctx, x, y, r, rot, color) {
+    ctx.save();
+    ctx.translate(x, y); ctx.rotate(rot);
+    ctx.fillStyle = color;
+    ctx.beginPath();
+    for (let i = 0; i < 5; i++) {
+      const a = i * (Math.PI * 2 / 5) - Math.PI / 2;
+      let px = Math.cos(a) * r, py = Math.sin(a) * r;
+      if (i === 0) ctx.moveTo(px, py); else ctx.lineTo(px, py);
+      const a2 = a + Math.PI / 5;
+      px = Math.cos(a2) * r * 0.45; py = Math.sin(a2) * r * 0.45;
+      ctx.lineTo(px, py);
+    }
+    ctx.closePath();
+    ctx.fill();
+    ctx.restore();
+  }
+
+  _drawWinRays(ctx, w, h, t) {
+    const cx = w / 2, cy = h * 0.32;
+    ctx.save();
+    ctx.translate(cx, cy);
+    ctx.rotate(t * 0.15);
+    const R = Math.max(w, h), N = 14;
+    ctx.globalAlpha = 0.06;
+    ctx.fillStyle = '#ffd54f';
+    for (let i = 0; i < N; i++) {
+      ctx.save();
+      ctx.rotate(i * (Math.PI * 2 / N));
+      ctx.beginPath();
+      ctx.moveTo(0, 0);
+      ctx.lineTo(R * 0.5, -10);
+      ctx.lineTo(R * 0.5, 10);
+      ctx.closePath();
+      ctx.fill();
+      ctx.restore();
+    }
+    ctx.restore();
+  }
+
+  _drawLoseVignette(ctx, w, h, t) {
+    const pulse = 0.22 + 0.08 * Math.sin(t * 2.2);
+    const g = ctx.createRadialGradient(w / 2, h / 2, h * 0.2, w / 2, h / 2, h * 0.75);
+    g.addColorStop(0, 'rgba(120,0,0,0)');
+    g.addColorStop(1, 'rgba(150,10,10,' + pulse.toFixed(3) + ')');
+    ctx.fillStyle = g;
+    ctx.fillRect(0, 0, w, h);
+  }
+
+  _drawResultParticles(ctx, t) {
+    const ps = this._resultParticles;
+    if (!ps || !ps.length) return;
+    const w = this.width, h = this.height;
+    const fall = t * 55;
+    ctx.save();
+    for (let i = 0; i < ps.length; i++) {
+      const p = ps[i];
+      let y = p.y + p.vy * fall;
+      y = ((y % (h + 40)) + (h + 40)) % (h + 40) - 20;
+      const x = p.x + Math.sin(y * 0.02 + p.rotation) * 12;
+      const rot = p.rotation + p.rotSpeed * fall;
+      const a = clamp01(p.alpha * Math.min(1, (y + 20) / 60));
+      if (a <= 0.02) continue;
+      ctx.globalAlpha = a;
+      if (p.type === 'star') {
+        this._drawStar(ctx, x, y, p.size * 0.9, rot, p.color);
+      } else if (p.type === 'shard') {
+        ctx.save(); ctx.translate(x, y); ctx.rotate(rot);
+        ctx.fillStyle = p.color;
+        ctx.fillRect(-p.size / 2, -p.size / 2, p.size, p.size * 1.6);
+        ctx.restore();
+      } else {
+        ctx.fillStyle = p.color;
+        ctx.beginPath(); ctx.moveTo(x + p.size, y); ctx.arc(x, y, p.size, 0, Math.PI * 2); ctx.fill();
+      }
+    }
+    ctx.globalAlpha = 1;
+    ctx.restore();
+  }
+
   _drawResult(ctx) {
     const w = this.width, h = this.height;
     const ST = this.safeTop || 44;
     const SB = this.safeBottom || 24;
     const buttons = [];
     const isWin = this.result === 'win';
+    const now = Date.now();
+    const rs = this._resultStartTime || 0;
+    const t = rs > 0 ? (now - rs) / 1000 : 99;   // 未初始化（测试）直接走终态
+    const bgA = clamp01(t / 0.35);               // 底图淡入
 
-    // 背景：半透明遮罩 + 胜利时金色径向光效
-    ctx.fillStyle = 'rgba(10,5,25,0.78)';
+    // 背景：暗色遮罩（淡入）+ 游戏化底图（胜利射线 / 失败暗角）
+    ctx.save();
+    ctx.globalAlpha = bgA;
+    ctx.fillStyle = 'rgba(8,4,20,0.82)';
     ctx.fillRect(0, 0, w, h);
     if (isWin) {
-      const winGrad = ctx.createRadialGradient(w / 2, h * 0.35, 0, w / 2, h * 0.35, h * 0.5);
-      winGrad.addColorStop(0, 'rgba(255,215,0,0.15)');
-      winGrad.addColorStop(0.5, 'rgba(255,215,0,0.05)');
-      winGrad.addColorStop(1, 'rgba(0,0,0,0)');
-      ctx.fillStyle = winGrad;
-      ctx.fillRect(0, 0, w, h);
+      const winGrad = this._gradFor(ctx, 'win|' + w + '|' + h, () => {
+        const g = ctx.createRadialGradient(w / 2, h * 0.34, 0, w / 2, h * 0.34, h * 0.55);
+        g.addColorStop(0, 'rgba(255,200,60,0.18)');
+        g.addColorStop(0.5, 'rgba(255,200,60,0.05)');
+        g.addColorStop(1, 'rgba(0,0,0,0)');
+        return g;
+      });
+      ctx.fillStyle = winGrad; ctx.fillRect(0, 0, w, h);
+      this._drawWinRays(ctx, w, h, t);
+    } else {
+      this._drawLoseVignette(ctx, w, h, t);
     }
+    ctx.restore();
 
     const cx = w / 2;
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
 
     // ---- 先测量整块（标题+分数+奖励+胜利专属+按钮）高度，再整体垂直居中 ----
-    const TITLE_H = 48, SCORE_H = 54, CHIP_H = 26, SPACER = 16, BTN_H = 42;
-    const STREAK_H = 20, DROP_H = 76, CHEST_H = 20, NOTE_H = 22;
+    const TITLE_H = 52, SCORE_H = 74, CHIP_H = 28, SPACER = 18, BTN_H = 46;
+    const STREAK_H = 22, DROP_H = 84, CHEST_H = 22, NOTE_H = 24;
+    const SCORE_GAP = 10;     // 分数块与能量模块之间的呼吸间距
+    const ENERGY_H = 54;      // 失败页能量模块高度（标签 + 能量核心 + 本局扣除）
+    const STAR_H = isWin ? 22 : 0;   // 胜利星级行（★）
 
     const streak = (this.game && this.game.winStreak) ? this.game.winStreak : 1;
     const mult = (this.game && typeof this.game.streakMultiplier === 'function') ? this.game.streakMultiplier() : 1;
 
-    let totalH = TITLE_H + SCORE_H + CHIP_H + SPACER + BTN_H;
+    let totalH = TITLE_H + SCORE_H + SPACER + BTN_H;
     let showStreak = false, showDrop = false, showChest = false;
     if (isWin) {
       showStreak = (streak >= 3 && mult < 5);
       showDrop = !!this.dropItem;
       showChest = !!this.chestDropped;
+      totalH += STAR_H;                       // 胜利星级行
+      totalH += CHIP_H;                       // 奖励胶囊行
       if (showStreak) totalH += STREAK_H;
       if (showDrop) totalH += DROP_H;
       if (showChest) totalH += CHEST_H;
-      if (this.arenaGained > 0) totalH += 28;   // 竞技积分行（P1-6：展示本局获得的竞技积分）
+      if (this.arenaGained > 0) totalH += 28; // 竞技积分行（P1-6：展示本局获得的竞技积分）
     } else {
-      totalH += NOTE_H;
+      totalH += SCORE_GAP + ENERGY_H;         // 分数块→能量模块呼吸 + 能量模块
+      if (this.runActive) totalH += 24;       // 连战关数行
+      totalH += NOTE_H + 12;                  // 提示文案与呼吸间距
     }
-    if (this.runActive) totalH += 18;   // 连战关数行
 
     // 居中于安全区（避开头顶状态栏与底部 Home 指示条），内容过高则贴顶
     const availTop = ST + 8;
@@ -2529,37 +3142,58 @@ class SpintopBattle {
     let cursor = availTop + (availBottom - availTop - totalH) / 2;
     if (cursor < availTop) cursor = availTop;
 
-    // ---- 标题（发光+缩放脉冲）----
+    // ---- 标题（描边+发光+砸入冲击）----
+    const titleAppear = easeOutBack(clamp01(t / 0.5));
+    const titleScale = 0.6 + 0.4 * titleAppear;
+    const titleAlpha = clamp01(t / 0.22);
     const titleY = cursor + TITLE_H / 2;
-    const titlePulse = 1 + Math.sin(Date.now() / 400) * 0.04;
-    ctx.save();
-    ctx.translate(cx, titleY);
-    ctx.scale(titlePulse, titlePulse);
-    ctx.fillStyle = isWin ? '#00e676' : '#ff5252';
-    ctx.shadowColor = isWin ? '#00e676' : '#ff5252';
-    ctx.shadowBlur = this._fxLow ? 0 : 20;
-    ctx.font = 'bold 40px sans-serif';
+    const titlePulse = 1 + Math.sin(now / 400) * 0.03;
     const titleTxt = this.isRingOut ? (isWin ? '出界制胜!' : '被撞出界') : (isWin ? '胜利!' : '失败');
+    ctx.save();
+    ctx.globalAlpha = titleAlpha;
+    ctx.translate(cx, titleY);
+    ctx.scale(titleScale * titlePulse, titleScale * titlePulse);
+    ctx.font = 'bold italic 46px sans-serif';
+    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.lineJoin = 'round';
+    ctx.lineWidth = 5;
+    ctx.strokeStyle = isWin ? '#6b3d00' : '#4a0c0c';
+    ctx.strokeText(titleTxt, 0, 0);
+    ctx.fillStyle = isWin ? '#ffd54f' : '#ff5252';
+    ctx.shadowColor = isWin ? '#ffd54f' : '#ff5252';
+    ctx.shadowBlur = this._fxLow ? 0 : 20;
     ctx.fillText(titleTxt, 0, 0);
     ctx.shadowBlur = 0;
     ctx.restore();
     cursor += TITLE_H;
 
-    // ---- 大分数 + 目标 ----
-    const scoreY = cursor + SCORE_H / 2 - 4;
-    const targetY = scoreY + 28;
+    // ---- 胜利星级（★）----
+    if (isWin) {
+      const starY = cursor + STAR_H / 2;
+      const sc = this._resultStarCount || 0;
+      const starR = 8, sGap = 10;
+      const totalW = 3 * starR * 2 + 2 * sGap;
+      let sx = cx - totalW / 2 + starR;
+      for (let i = 0; i < 3; i++) {
+        this._drawStar(ctx, sx, starY, starR, 0, i < sc ? '#ffd54f' : 'rgba(255,255,255,0.18)');
+        sx += starR * 2 + sGap;
+      }
+      cursor += STAR_H;
+    }
+
+    // ---- 大分数（滚动）+ 目标（拉开间距，留呼吸感）----
+    const scoreY = cursor + SCORE_H / 2 - 10;
+    const targetY = scoreY + 32;
+    const tScore = clamp01((t - 0.3) / 0.7);
+    const shownScore = Math.round(this.score * easeOutCubic(tScore));
     ctx.fillStyle = '#ffffff';
-    ctx.font = 'bold 44px sans-serif';
-    ctx.fillText(formatNumber0(this.score), cx, scoreY);
-    ctx.fillStyle = 'rgba(255,255,255,0.7)';
+    ctx.font = 'bold 46px sans-serif';
+    ctx.fillText(formatNumber0(shownScore), cx, scoreY);
+    ctx.fillStyle = 'rgba(255,255,255,0.66)';
     ctx.font = '12px sans-serif';
     ctx.fillText('目标 ' + formatNumber0(this.targetScore), cx, targetY);
-    if (this.runActive) {
-      ctx.fillStyle = 'rgba(255,213,79,0.9)';
-      ctx.font = '12px sans-serif';
-      ctx.fillText('连战 · 第 ' + this.runStage + ' 关', cx, targetY + 18);
-    }
     cursor += SCORE_H;
+    if (!isWin) cursor += SCORE_GAP;   // 分数块与能量模块之间的呼吸间距
 
     // ---- 奖励胶囊行 ----
     const chipTop = cursor;
@@ -2568,37 +3202,74 @@ class SpintopBattle {
         { icon: 'coin', txt: '+' + formatNumber0(this.reward) },
         { icon: 'double', txt: '连胜 ×' + streak + '  ×' + mult + '倍' }
       ];
-      const gap = 10, cw = 94, chh = 26;
+      const gap = 10, cw = 96, chh = 28;
       const total = cw * chips.length + gap * (chips.length - 1);
       let cxx = cx - total / 2;
-      for (const c of chips) {
-        ctx.fillStyle = 'rgba(255,255,255,0.1)';
-        roundRectPath(ctx, cxx, chipTop, cw, chh, chh / 2); ctx.fill();
-        ctx.strokeStyle = 'rgba(255,255,255,0.22)'; ctx.lineWidth = 1;
-        roundRectPath(ctx, cxx + 0.5, chipTop + 0.5, cw - 1, chh - 1, chh / 2 - 0.5); ctx.stroke();
-        drawHudIcon(ctx, c.icon, cxx + 15, chipTop + chh / 2, 18);
-        ctx.fillStyle = '#ffd54f';
+      chips.forEach((c, i) => {
+        const ccx = cxx, ccy = chipTop + chh / 2;
+        this._popIn(ctx, ccx + cw / 2, ccy, 0.8 + i * 0.12, t, () => {
+          ctx.fillStyle = 'rgba(255,255,255,0.1)';
+          roundRectPath(ctx, ccx, chipTop, cw, chh, chh / 2); ctx.fill();
+          ctx.strokeStyle = 'rgba(255,255,255,0.22)'; ctx.lineWidth = 1;
+          roundRectPath(ctx, ccx + 0.5, chipTop + 0.5, cw - 1, chh - 1, chh / 2 - 0.5); ctx.stroke();
+          drawHudIcon(ctx, c.icon, ccx + 16, ccy, 18);
+          ctx.fillStyle = '#ffd54f';
+          ctx.font = 'bold 13px sans-serif';
+          ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
+          ctx.fillText(c.txt, ccx + 32, ccy);
+          ctx.textAlign = 'center';
+        });
+        cxx += cw + gap;
+      });
+    } else {
+      // ---- 失败页能量核心模块：当前能量 + 分段能量槽 + 本局扣除 ----
+      const eW = 220, eH = ENERGY_H;
+      const eX = cx - eW / 2;
+      const eTop = chipTop;
+      const ccx = cx, ccy = eTop + eH / 2;
+      this._popIn(ctx, ccx, ccy, 0.8, t, () => {
+        ctx.fillStyle = 'rgba(255,255,255,0.08)';
+        roundRectPath(ctx, eX, eTop, eW, eH, 14); ctx.fill();
+        ctx.strokeStyle = 'rgba(255,82,82,0.28)'; ctx.lineWidth = 1;
+        roundRectPath(ctx, eX + 0.5, eTop + 0.5, eW - 1, eH - 1, 13.5); ctx.stroke();
+        // 行1：图标 + 当前能量（左） / 本局扣除（右）
+        const lineY = eTop + 17;
+        drawHudIcon(ctx, 'energy', eX + 18, lineY, 16);
+        const cur = Math.max(0, Math.round(this.game ? this.game.energy : 0));
+        const maxE = Math.max(1, Math.round(this.game ? this.game.maxEnergy : 150));
+        ctx.fillStyle = '#ffffff';
         ctx.font = 'bold 13px sans-serif';
         ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
-        ctx.fillText(c.txt, cxx + 30, chipTop + chh / 2);
+        ctx.fillText('能量 ' + cur + '/' + maxE, eX + 38, lineY);
+        ctx.fillStyle = '#ff5252';
+        ctx.font = 'bold 13px sans-serif';
+        ctx.textAlign = 'right';
+        ctx.fillText('−' + LOSE_ENERGY_PENALTY, eX + eW - 16, lineY);
         ctx.textAlign = 'center';
-        cxx += cw + gap;
-      }
-    } else {
-      const cw = 112, chh = 26;
-      const cxx = cx - cw / 2;
-      ctx.fillStyle = 'rgba(255,255,255,0.1)';
-      roundRectPath(ctx, cxx, chipTop, cw, chh, chh / 2); ctx.fill();
-      ctx.strokeStyle = 'rgba(255,82,82,0.35)'; ctx.lineWidth = 1;
-      roundRectPath(ctx, cxx + 0.5, chipTop + 0.5, cw - 1, chh - 1, chh / 2 - 0.5); ctx.stroke();
-      drawHudIcon(ctx, 'energy', cxx + 15, chipTop + chh / 2, 18);
-      ctx.fillStyle = '#ff5252';
-      ctx.font = 'bold 13px sans-serif';
-      ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
-      ctx.fillText('能量 -' + LOSE_ENERGY_PENALTY, cxx + 30, chipTop + chh / 2);
-      ctx.textAlign = 'center';
+        // 行2：能量核心（分段槽，入场后由 0→ratio 充电扫入）
+        const barX = eX + 18, barW = eW - 36, barY = eTop + 34, barH = 7;
+        const ratio = Math.max(0, Math.min(1, cur / maxE));
+        const eFill = clamp01((t - 1.0) / 0.45);   // 卡牌 pop-in 完成后，能量槽充电扫入
+        const ratioShown = ratio * easeOutCubic(eFill);
+        const SEG = 16, sgap = 2, sw = (barW - sgap * (SEG - 1)) / SEG;
+        for (let i = 0; i < SEG; i++) {
+          const segX = barX + i * (sw + sgap);
+          const on = (i + 0.5) / SEG <= ratioShown;
+          ctx.fillStyle = on ? '#ffca28' : 'rgba(255,255,255,0.12)';
+          roundRectPath(ctx, segX, barY, sw, barH, barH / 2); ctx.fill();
+        }
+      });
     }
-    cursor += CHIP_H;
+    cursor += (isWin ? CHIP_H : ENERGY_H);
+
+    // ---- 连战关数行（独立一行，避免压到分数/芯片/按钮；runActive 时展示）----
+    if (this.runActive) {
+      const runY = cursor + 12;
+      ctx.fillStyle = 'rgba(255,213,79,0.9)';
+      ctx.font = '12px sans-serif';
+      ctx.fillText('连战 · 第 ' + this.runStage + ' 关', cx, runY);
+      cursor += 24;
+    }
 
     // ---- 竞技积分（P1-6：胜利时算出但此前结算页未展示）----
     if (isWin && this.arenaGained > 0) {
@@ -2613,65 +3284,82 @@ class SpintopBattle {
     if (isWin) {
       if (showStreak) {
         const sy = cursor + STREAK_H / 2;
-        ctx.fillStyle = '#ffd54f';
-        ctx.font = 'bold 12px sans-serif';
-        const againTxt = '再赢一局 · 金币 5 倍';
-        const againTw = ctx.measureText(againTxt).width;
-        drawHudIcon(ctx, 'play', cx - againTw / 2 - 12, sy, 14);
-        ctx.fillText(againTxt, cx, sy);
+        this._popIn(ctx, cx, sy, 0.95, t, () => {
+          ctx.fillStyle = '#ffd54f';
+          ctx.font = 'bold 12px sans-serif';
+          const againTxt = '再赢一局 · 金币 5 倍';
+          const againTw = ctx.measureText(againTxt).width;
+          drawHudIcon(ctx, 'play', cx - againTw / 2 - 12, sy, 14);
+          ctx.fillText(againTxt, cx, sy);
+        });
         cursor += STREAK_H;
       }
       if (showDrop) {
-        const topCy = cursor + 22;
-        ctx.save();
-        ctx.translate(cx, topCy);
-        ctx.rotate(Date.now() * 0.002);
-        drawBeyblade(ctx, 0, 0, this.dropItem, 0.85);
-        ctx.restore();
-        ctx.fillStyle = 'rgba(255,255,255,0.6)';
-        ctx.font = '12px sans-serif';
-        ctx.fillText(this.dropItem.tier.name + ' · Lv' + this.dropItem.level, cx, topCy + 48);
+        const topCy = cursor + 24;
+        this._popIn(ctx, cx, topCy, 1.05, t, () => {
+          ctx.save();
+          ctx.translate(cx, topCy);
+          ctx.rotate(now * 0.002);
+          drawBeyblade(ctx, 0, 0, this.dropItem, 0.85);
+          ctx.restore();
+          ctx.fillStyle = 'rgba(255,255,255,0.6)';
+          ctx.font = '12px sans-serif';
+          ctx.fillText(this.dropItem.tier.name + ' · Lv' + this.dropItem.level, cx, topCy + 48);
+        });
         cursor += DROP_H;
       }
       if (showChest) {
         const qy = cursor + CHEST_H / 2;
-        const qNames = ['青铜', '白银', '黄金'];
-        ctx.fillStyle = '#ffd54f';
-        ctx.font = 'bold 12px sans-serif';
-        ctx.fillText('获得' + qNames[this.chestDropped.quality] + '竞技宝箱！', cx, qy);
+        this._popIn(ctx, cx, qy, 1.18, t, () => {
+          const qNames = ['青铜', '白银', '黄金'];
+          ctx.fillStyle = '#ffd54f';
+          ctx.font = 'bold 12px sans-serif';
+          ctx.fillText('获得' + qNames[this.chestDropped.quality] + '竞技宝箱！', cx, qy);
+        });
         cursor += CHEST_H;
       }
     } else {
       const lost = (this.game && this.game.winStreak > 0);
-      const noteY = chipTop + CHIP_H + 16;
+      cursor += 12;                        // 呼吸间距：能量模块与提示之间
+      const noteY = cursor + NOTE_H / 2;   // 提示居中于其预留高度，避免压到按钮
       ctx.fillStyle = 'rgba(255,255,255,0.72)';
       ctx.font = '11px sans-serif';
       ctx.fillText(lost ? '连胜中断，再接再厉' : '再接再厉', cx, noteY);
+      cursor += NOTE_H;                    // 24，与 totalH 预留一致
     }
 
-    // ---- 按钮（整行水平居中，随内容块一起垂直居中）----
+    // ---- 按钮（CTA：外发光 + 入场 spring）----
     cursor += SPACER;
     const btnY = cursor;
+    const btnAppear = clamp01((t - 1.0) / 0.35);
+    const btnSpring = 0.6 + 0.4 * easeOutBack(btnAppear);
     if (isWin) {
-      const btnW3 = 88, gap3 = 10;
+      const btnW3 = 90, gap3 = 10;
       const total3 = btnW3 * 3 + gap3 * 2;
       const x0 = cx - total3 / 2;
       const share  = { x: x0, y: btnY, w: btnW3, h: BTN_H, action: 'battle_share' };
       const again  = { x: x0 + btnW3 + gap3, y: btnY, w: btnW3, h: BTN_H, action: 'battle_again' };
       const back   = { x: x0 + (btnW3 + gap3) * 2, y: btnY, w: btnW3, h: BTN_H, action: 'battle_back' };
-      this._drawButton(ctx, share.x, share.y, share.w, share.h, '炫耀', '#ffb300');
-      this._drawButton(ctx, again.x, again.y, again.w, again.h, '再战', '#e53935');
-      this._drawButton(ctx, back.x,  back.y,  back.w,  back.h,  '返回', '#7e57c2');
+      // #6 核心循环无缝化：胜利结算屏里 winStreak 已 +1（spintop.js:837），故「再战」恒为连胜免门票态。
+      // 文案显式标「·免票」，让玩家明确感知连胜福利，结算→再战不再被能量门槛打断。
+      const againLabel = ((this.game && this.game.winStreak) ? this.game.winStreak : 0) >= 1 ? '再战·免票' : '再战';
+      this._drawButton(ctx, share.x, share.y, share.w, share.h, '炫耀', '#ffb300', { spring: btnSpring, glow: 0.4, action: 'battle_share' });
+      this._drawButton(ctx, again.x, again.y, again.w, again.h, againLabel, '#e53935', { spring: btnSpring, glow: 0.85, action: 'battle_again' });
+      this._drawButton(ctx, back.x,  back.y,  back.w,  back.h,  '返回', '#7e57c2', { spring: btnSpring, glow: 0.4, action: 'battle_back' });
       buttons.push(share, again, back);
     } else {
       const halfGap = 10;
-      const btnW_a = 96, btnW_b = 96;
+      const btnW_a = 100, btnW_b = 100;
       const revive = { x: cx - btnW_a - halfGap, y: btnY, w: btnW_a, h: BTN_H, action: 'battle_revive' };
       const back   = { x: cx + halfGap,         y: btnY, w: btnW_b, h: BTN_H, action: 'battle_back' };
-      this._drawButton(ctx, revive.x, revive.y, revive.w, revive.h, '看广告复活', '#ffb300');
-      this._drawButton(ctx, back.x,   back.y,   back.w,   back.h,   '返回',       '#7e57c2');
+      const reviveGlow = 0.6 + 0.4 * Math.abs(Math.sin(now / 350));
+      this._drawButton(ctx, revive.x, revive.y, revive.w, revive.h, '再战', '#ffb300', { spring: btnSpring, glow: reviveGlow, action: 'battle_revive' });
+      this._drawButton(ctx, back.x,   back.y,   back.w,   back.h,   '返回',       '#7e57c2', { spring: btnSpring, glow: 0.4, action: 'battle_back' });
       buttons.push(revive, back);
     }
+
+    // ---- 结算粒子（胜利撒花 / 失败余烬）----
+    this._drawResultParticles(ctx, t);
 
     return buttons;
   }

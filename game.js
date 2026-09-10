@@ -28,11 +28,22 @@ try {
   } catch (e2) {}
 }
 
+// 记录系统信息是从哪个 API 拿到的（真机诊断用：
+// 若日志出现 sysInfoVia=DEFAULT，说明 jsbridge 迟迟未就绪、走了默认尺寸兜底，
+// 需要靠 500ms 后的 lateResize 修正，可与基础库那条"jsbridge not ready"区分开）
+let _sysInfoVia = null;
+
 function readSystemInfo() {
   try {
     if (typeof wx === 'undefined') return null;
-    if (typeof wx.getWindowInfo === 'function') return wx.getWindowInfo();
-    if (typeof wx.getSystemInfoSync === 'function') return wx.getSystemInfoSync();
+    if (typeof wx.getWindowInfo === 'function') {
+      const i = wx.getWindowInfo();
+      if (i) { _sysInfoVia = 'getWindowInfo'; return i; }
+    }
+    if (typeof wx.getSystemInfoSync === 'function') {
+      const i = wx.getSystemInfoSync();
+      if (i) { _sysInfoVia = 'getSystemInfoSync'; return i; }
+    }
   } catch (e) {}
   return null;
 }
@@ -94,6 +105,9 @@ function launch(info) {
     }
     canvas.width = winW;
     canvas.height = fullH;
+    // 启动诊断：一眼看出系统信息走的是哪条路径（ok=正常取到；DEFAULT=jsbridge 未就绪兜底）
+    console.log('[boot] launch: sysInfoVia=' + (_sysInfoVia || 'DEFAULT')
+      + ' win=' + winW + 'x' + winH + ' canvas=' + canvas.width + 'x' + canvas.height);
     const game = new Main(canvas, ctx, info);
     game.start();
     if (typeof wx !== 'undefined') wx.game = game;
@@ -169,4 +183,123 @@ function lateResize(game, canvas) {
   }
 }
 
+/**
+ * 强制更新：新版本下载完成后弹「无取消按钮」弹窗，用户点确定即重启应用新版本。
+ *
+ * 背景：平台默认**不强制** —— 冷启动发现有新版本时，会异步下载新包但本次仍用本地旧包启动，
+ * 新版本要等「下一次冷启动」才生效（官方口径：最差 24 小时内覆盖全量用户）。
+ * 要「强制用户使用最新版本」，必须主动接 UpdateManager。
+ * 参见 https://developers.weixin.qq.com/minigame/dev/guide/runtime/update-mechanism
+ *
+ * ⚠️ 注意：
+ * - 开发版/体验版没有「版本」概念，不会触发；只能在线上正式版验证。
+ *   DevTools 可用「编译模式 → 下次编译时模拟更新」调试，真机无法调试。
+ * - onCheckForUpdate 在部分客户端（Mac / 低版本 PC）不触发，故主逻辑必须放 onUpdateReady。
+ * - applyUpdate() 会**立即重启、不走 onHide**，而常规存档是每帧**异步**写（src/main.js:1358），
+ *   最后那一帧可能未落盘 → 重启前必须补一次**同步** save(true)，否则存在丢档窗口。
+ * - wx.game 挂的是 **Main 实例**（见下方 launch()），GameState 在 Main 的 .game 上（src/main.js:162），
+ *   故调用路径是 wx.game.game.save(true)，别写成 wx.game.save(true)。
+ * - applyUpdate() 会**立即重启**，若此刻正在对战（mode==='battle' && battle.phase==='playing'），
+ *   当前这局会被直接弄丢。故对战中会**挂起弹窗**、每 1s 轮询到本局结束再弹（带上限，超时照弹）。
+ */
+/**
+ * 是否处于「不适合立刻重启」的时机：对战进行中。
+ * 判定口径与 src/main.js:782 一致（mode === 'battle' && battle.phase === 'playing'）。
+ * wx.game 尚未挂载（游戏还没 boot 完）时返回 false —— 此时重启反而最省事，不必等。
+ */
+function isInBattle() {
+  try {
+    const gs = wx.game && wx.game.game;
+    if (!gs || gs.mode !== 'battle') return false;
+    const b = gs.battle;
+    return !!(b && b.phase === 'playing');
+  } catch (e) {
+    return false;   // 状态读取异常 → 按「不在对战」处理，保证强制更新不丢
+  }
+}
+
+/**
+ * 同步落盘：堵住 applyUpdate()「立即重启、不走 onHide」造成的丢档窗口。
+ * 常规存档是每帧**异步**写（src/main.js:1358），最后那一帧很可能还没落盘。
+ */
+function saveNow() {
+  try {
+    const mainInst = wx.game;
+    const gs = mainInst && mainInst.game;   // Main 实例上的 GameState
+    if (gs && typeof gs.save === 'function') gs.save(true);
+  } catch (e) {
+    console.warn('[update] save before restart failed:', e && e.message);
+  }
+}
+
+/**
+ * 单按钮弹窗（showCancel:false）→ 用户只能点「立即更新」，实现强制。
+ * 弹窗本身抛异常（极端情况）→ 兜底直接 applyUpdate，保证「强制」语义不丢失。
+ */
+function showForceModal(um) {
+  try {
+    wx.showModal({
+      title: '更新提示',
+      content: '新版本已就绪，点击确定立即更新',
+      showCancel: false,      // 无取消按钮 = 强制
+      confirmText: '立即更新',
+      success: function (r) {
+        if (r && r.confirm) um.applyUpdate();
+      }
+    });
+  } catch (e) {
+    try { um.applyUpdate(); } catch (e2) {}
+  }
+}
+
+/**
+ * 对战进行中 → 挂起弹窗，每 1s 轮询到本局结束再弹。
+ * applyUpdate() 会**立即重启**，中途弹窗等于把玩家当前这局直接弄丢（存档保住、这局白打）。
+ * 带轮询上限：状态万一卡住也不让「强制」语义丢失 —— 超时后照样弹。
+ */
+function deferUntilBattleEnd(um) {
+  var tries = 0;
+  var MAX_TRIES = 60;   // ≈60s
+  (function poll() {
+    tries++;
+    if (!isInBattle()) { showForceModal(um); return; }
+    if (tries > MAX_TRIES) {
+      console.warn('[update] 等待本局结束超时 → 仍然强制提示更新');
+      showForceModal(um);
+      return;
+    }
+    setTimeout(poll, 1000);
+  })();
+}
+
+function setupForceUpdate() {
+  try {
+    if (typeof wx === 'undefined' || typeof wx.getUpdateManager !== 'function') return; // 非微信环境/老基础库
+    const um = wx.getUpdateManager();
+
+    um.onCheckForUpdate(function (res) {
+      console.log('[update] check done: hasUpdate=' + !!(res && res.hasUpdate));
+    });
+
+    um.onUpdateReady(function () {
+      console.log('[update] ready → 强制重启以应用新版本');
+      saveNow();                  // ① 先同步落盘，堵住丢档窗口
+      if (isInBattle()) {         // ② 对战中 → 挂起到本局结束再弹
+        console.log('[update] 对战进行中 → 延后到本局结束再提示（避免重启弄丢当前这局）');
+        deferUntilBattleEnd(um);
+        return;
+      }
+      showForceModal(um);         // ③ 单按钮弹窗 → 强制
+    });
+
+    um.onUpdateFailed(function () {
+      // 多为网络问题：不阻塞玩家，下次冷启动会自动重试
+      console.warn('[update] download failed, will retry on next cold start');
+    });
+  } catch (e) {
+    console.warn('[update] setup failed:', e && e.message);
+  }
+}
+
+setupForceUpdate();
 boot();

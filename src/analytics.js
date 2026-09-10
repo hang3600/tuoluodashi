@@ -88,9 +88,50 @@ function reportFirstBattleDone() {
   return true;
 }
 
+// ===================== 新增 5 个漏斗（U10） =====================
+// 全部复用 reportBranch + config.analyticsBranch，未配 branchId 零上报、
+// wx 缺失/异常静默；与既有 3 个事件完全同构。
+
+// 抽卡：tierIndex(0-4) 映射为 1-5，作为「抽到稀有度分布」维度。
+// 触发点 game.js draw() 成功分支（返回 null=付不起，不报）。
+function reportDraw(tierIndex) {
+  const dim = Math.max(1, Math.min(5, Math.floor((tierIndex || 0) + 1)));
+  reportBranch(_branchIds.draw, dim, 1);
+}
+
+// 合成：合成产物的 tierIndex(0-4) 映射为 1-5。
+// 触发点 game.js tryMerge() 成功返回 merged 前。
+function reportMerge(tierIndex) {
+  const dim = Math.max(1, Math.min(5, Math.floor((tierIndex || 0) + 1)));
+  reportBranch(_branchIds.merge, dim, 1);
+}
+
+// 战败：关卡 stage（天然 1-100）作为维度，与 battle_start 对齐。
+// 触发点 main.js 战斗 result=lose 分支（_resultPlayed 守卫，每局一次）。
+function reportBattleDefeat(stage) {
+  const dim = Math.max(1, Math.min(100, Math.floor(stage || 1)));
+  reportBranch(_branchIds.battleDefeat, dim, 1);
+}
+
+// 分享：无维度。触发点 game.js doShare() 成功（shareCount++ 后）。
+function reportShare() {
+  reportBranch(_branchIds.share, '', 1);
+}
+
+// 广告：激励视频看完（watchAdEnergy 成功），无维度。
+// 触发点 game.js watchAdEnergy() 成功（adEnergyCount++ 后）。
+function reportAdWatch() {
+  reportBranch(_branchIds.adWatch, '', 1);
+}
+
 module.exports = {
   reportBoot,
   reportBattleStart,
   reportFirstBattleDone,
+  reportDraw,
+  reportMerge,
+  reportBattleDefeat,
+  reportShare,
+  reportAdWatch,
   FIRST_DONE_KEY
 };

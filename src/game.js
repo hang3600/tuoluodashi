@@ -7,6 +7,7 @@
 
 const { Beyblade, TIERS, randomBeyblade } = require('./beyblade');
 const { clamp } = require('./utils');
+const { reportDraw, reportMerge, reportShare, reportAdWatch } = require('./analytics'); // 零成本埋点：抽卡/合成/分享/广告漏斗（U10）
 
 const SIGN_REWARDS = [
   { coins: 60,  energy: 0,  beyblade: null },
@@ -95,6 +96,9 @@ class GameState {
     this.arenaClaimedWeek = '';   // 已结算奖励的周 key（防重复发奖）
     this.arenaOpen = false;       // 竞技场面板开关（纯 UI，不入存档）
     this.arenaT = 0;              // 面板入场动画计时（纯 UI）
+    this.homeV2 = true;           // 主界面游戏化骨架开关（纯 UI，不入存档）：false = 回退旧大厅三段式
+    this.invRailV2 = true;        // 背包陈列轨道开关（纯 UI，不入存档）：false = 回退网格列表
+    this.quickBattleV2 = true;    // 快速开战开关（纯 UI，不入存档）：false = 主按钮先弹局前增益面板
 
     // 大师等级（play-design v1）：全局经验成长线，升级提升能量上限 + 里程碑奖励
     this.exp = 0;                 // 全局经验
@@ -111,6 +115,14 @@ class GameState {
 
     this.tutorialDone = true; // 新手引导已去除（用户要求不再显示）
     this.tutorialStep = 2;
+
+    // 首程直达（2026-09-04 数据诊断：首分钟流失 61%、首日时长 2.1min vs 标杆 12.9min，
+    // 根因是玩法释放速度而非广告）——不打断、不弹窗、无遮罩的 2 步轻引导：
+    //   obStep 1 = 新档无陀螺 → 高亮「抽卡」；抽到第一只 → 2 = 高亮「对战」；首胜收起。
+    // obDone 持久化防老玩家误触发（load 时 level>1 的老档直接视为已完成）。
+    this.obStep = 1;
+    this.obDone = false;
+    this.obTries = 0;   // 引导期连败计数（≥3 强制收起，防失败玩家被持续打扰）
     this.adEnergyDate = '';
     this.adEnergyCount = 0;
 
@@ -205,6 +217,8 @@ class GameState {
     this.unlockCollection(bb.tierIndex, bb.level);
     this.recordDailyTask('draw'); // 每日挑战：抽卡任务
     this.addExp(10);              // 大师等级：抽卡 +10 经验
+    reportDraw(bb.tierIndex);     // 零成本埋点：抽卡漏斗（稀有度维度 1-5）
+    if (!this.obDone && this.obStep === 1) this.obStep = 2; // 首程引导：抽到第一只 → 引导去对战
     // 限时活动（play-design v1）：节日期间抽卡 20% 概率额外掉落限定陀螺
     this._festivalDrop = null;
     if (typeof this.activityInfo === 'function' && this.activityInfo().festival && Math.random() < 0.2) {
@@ -218,6 +232,22 @@ class GameState {
       }
     }
     return bb;
+  }
+
+  /**
+   * 首程引导收口（对战结束时由 main.js 调用）。
+   * 首胜即完成；连败 3 场兜底强制收起（防失败玩家被持续高亮打扰）。
+   * @param {boolean} win 本局是否胜利
+   * @returns {boolean} true = 本次调用收起了引导（可用于埋点/提示）
+   */
+  onBattleEnd(win) {
+    if (this.obDone) return false;
+    if (win || ++this.obTries >= 3) {
+      this.obDone = true;
+      this.obStep = 0;
+      return true;
+    }
+    return false;
   }
 
   /** 保底抽卡：史诗 10 抽保底、传说 30 抽保底（play-design v1），进度可读 pityEpic/pityLegend */
@@ -545,6 +575,7 @@ class GameState {
           this.addExp(20);               // 大师等级：合成 +20 经验
           // 批次D·彩蛋（play-design v1）：累计合成计数（隐藏传说触发条件）
           this.mergeCount++;
+          reportMerge(merged.tierIndex); // 零成本埋点：合成漏斗（产物稀有度维度 1-5）
           return merged;
         }
       }
@@ -698,6 +729,11 @@ class GameState {
     }
     return { quality: q, reward };
   }
+  // 青铜宝箱「开启」门控：当日是否还有 1 次免费开启名额（与 openBattleChest 的每日限制同源）。
+  // 用户诉求（2026-08-31）：首次开启免费、之后每次需看广告开 → 以「每日首次」为免费名额。
+  isChestFreeOpenAvailable() {
+    return this.chestOpenDate !== this._todayKey();
+  }
 
   // 好友助力：分享回跳领助力能量（每日 5 次）
   canClaimBoost() {
@@ -734,6 +770,7 @@ class GameState {
   doShare() {
     if (!this.canShare()) return false;
     this.shareCount++;
+    reportShare();                 // 零成本埋点：分享漏斗
     this.energy = Math.min(this.maxEnergy, this.energy + 20);
     return true;
   }
@@ -765,11 +802,12 @@ class GameState {
   watchAdEnergy() {
     if (!this.canWatchAdEnergy()) return false;
     this.adEnergyCount++;
+    reportAdWatch();               // 零成本埋点：激励视频看完漏斗
     this.energy = Math.min(this.maxEnergy, this.energy + 60);
     return true;
   }
 
-  // 抽卡隐藏插屏广告：每日上限 + 降级判断（业务层频控；平台最小间隔由 ads.js 的 Interstitial 守卫）
+  // 抽卡激励广告：每日上限 + 降级判断（业务层频控；按钮由玩家主动点击，无平台最小间隔）
   canShowDrawInterstitial() {
     const today = this._todayKey();
     if (this.interAdDate !== today) { this.interAdDate = today; this.interAdCount = 0; }
@@ -783,17 +821,23 @@ class GameState {
   }
 
   /**
-   * 抽卡隐藏插屏：判定本次抽卡后是否应安排插屏（纯规则，便于测试）。
-   * 节奏：第3/6/9…抽必弹(fixed) + 非倍数抽 18% 概率随机补(random)。
-   * 注意：仅判"规则层"（每日上限 + 3抽节奏）；平台最小间隔由 ads.js 的 Interstitial 守卫。
-   * @returns {boolean}
+   * 抽卡激励广告调度：判定本次抽卡后是否应安排广告，以及用哪个广告位（纯规则，便于测试）。
+   * 节奏（按累计抽数 drawsSinceAd）：
+   *   - 第3/6/9抽必弹，分别对应独立广告位 draw3/draw6/draw9；
+   *   - 超过9抽按模循环复用（12→draw6、15→draw3、18→draw9…）；
+   *   - 逢2的倍数（且非3的倍数）随机弹 rand2 位（概率 0.5）。
+   * 命中后：main.js 把 key 记到 game._drawRewardKey，收卡时 _dismissDrawCard 自动 Rewarded.show（隐藏式、无按钮）。
+   * 注意：仅判"规则层"（每日上限 + 抽数节奏 + 随机）；并发/重试由 ads.js 的 Rewarded 守卫（entry._busy）。
+   * @returns {string|null} 广告位 key（draw3/draw6/draw9/rand2）或 null（本次不弹）
    */
   shouldScheduleDrawInterstitial() {
-    if (!this.canShowDrawInterstitial()) return false; // 当日已达上限 / 降级中
+    if (!this.canShowDrawInterstitial()) return null; // 当日已达上限 / 降级中
     const n = this.drawsSinceAd;
-    const fixed = (n % 3 === 0);                  // 第3/6/9抽必弹
-    const random = !fixed && Math.random() < 0.18; // 中间随机补
-    return fixed || random;
+    if (n > 0 && n % 9 === 0) return 'draw9';       // 第9抽（及18/27…）必弹 → draw9
+    if (n > 0 && n % 6 === 0) return 'draw6';       // 第6抽（及12/24…）必弹 → draw6
+    if (n > 0 && n % 3 === 0) return 'draw3';       // 第3抽（及15/21…）必弹 → draw3
+    if (n > 0 && n % 2 === 0 && Math.random() < 0.5) return 'rand2'; // 逢2的倍数随机 → rand2
+    return null;
   }
 
   canSign() {
@@ -814,6 +858,18 @@ class GameState {
 
   // 签到升级版（play-design v1）：连续满 7 天进入双倍日（奖励 ×2），断签清零
   get signBonus() { return this.signStreak >= 7; }
+
+  // 启动期「是否应自动弹出签到面板」的纯判定（无副作用，可测试）。
+  // ⚠️ 不调用 canSign()：canSign 会改写 signDate/signClaimed 做日期滚动，
+  //    若在此处调用会把状态提前推进；本方法只读取已存字段做展示决策。
+  // 判定逻辑：今日尚未签领（signDate 非今日，或今日 signClaimed 仍为假）即视为可弹；
+  //          同时若有回归礼包弹窗（offlineOpen）则让位，避免两个浮层叠加。
+  autoSignAvailable() {
+    if (this.offlineOpen) return false;
+    const today = this._todayKey();
+    const dueToday = (this.signDate !== today) || !this.signClaimed;
+    return dueToday;
+  }
 
   checkIn() {
     if (!this.canSign()) return null;
@@ -967,6 +1023,8 @@ class GameState {
         codexClaimed: this.codexClaimed,
         tutorialDone: this.tutorialDone,
         tutorialStep: this.tutorialStep,
+        obDone: this.obDone ? 1 : 0,
+        obTries: this.obTries,
         adEnergyDate: this.adEnergyDate,
         adEnergyCount: this.adEnergyCount,
         drawsSinceAd: this.drawsSinceAd,
@@ -1012,6 +1070,7 @@ class GameState {
     return [this.coins, this.energy, this.maxEnergy, this.inventory.length, plat,
       this.filterTier, this.shareDate, this.shareCount, this.refillDate, this.refillCount,
       this.winStreak, this.pityEpic, this.pityLegend, this.tutorialDone ? 1 : 0, this.tutorialStep,       this.adEnergyDate,
+      this.obDone ? 1 : 0, this.obTries,
       this.adEnergyCount, this.drawsSinceAd, this.interAdDate, this.interAdCount, this.interAdBroken ? 1 : 0,
       this.signDate, this.signDay, this.signClaimed ? 1 : 0,
       this.signStreak, this.signMakeupDate, this.lastSeen, this.offlineRewardDate,
@@ -1085,6 +1144,10 @@ class GameState {
       this.codexClaimed = [0, 5, 10, 15, 20].indexOf(Number(data.codexClaimed)) >= 0 ? Number(data.codexClaimed) : 0;
       this.tutorialDone = true; // 新手引导已去除，强制为 true
       this.tutorialStep = 2;
+      // 首程引导恢复：老档（level>1，说明早已玩过）直接视为完成，不误触发；
+      // obStep 不入存档，按 obDone + inventory 推导（空包→引导抽卡，有货→引导对战）。
+      this.obDone = Number(data.obDone) === 1 || this.level > 1;
+      this.obTries = Math.max(0, Math.min(3, Number(data.obTries) || 0));
       this.adEnergyDate = typeof data.adEnergyDate === 'string' ? data.adEnergyDate : '';
       this.adEnergyCount = Math.max(0, Number(data.adEnergyCount) || 0);
       this.drawsSinceAd = Math.max(0, Number(data.drawsSinceAd) || 0);
@@ -1144,6 +1207,8 @@ class GameState {
           if (item) item.unlocked = !!saved.unlocked;
         }
       }
+      // 首程引导 obStep 推导必须在 inventory 恢复之后（依赖背包是否为空）
+      this.obStep = this.obDone ? 0 : (this.inventory.length === 0 ? 1 : 2);
     } catch (e) {
       console.warn('[load] failed, starting fresh:', e && e.message || e);
     }

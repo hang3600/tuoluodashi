@@ -3,9 +3,18 @@ preview/
 .tmpcheck/
 project.private.config.json
 
+# ===== 本地备份 / 死代码回收（不得入仓） =====
+.trash_deadcode/
+_bak_*/
+*_before_replace/
+
 # ===== 系统 / 编辑器 =====
 .DS_Store
 Thumbs.db
 
 # ===== 依赖兜底（本项目零 npm 依赖） =====
 node_modules/
+# ===== 生成式 base64 背景源（打包排除，与 src/imgb64.js 同源；可自 images/ 重建，不入仓避免大文件进 repo） =====
+src/homebg.js
+src/codexbg.js
+battle/arenabg.js

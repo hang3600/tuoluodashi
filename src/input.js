@@ -49,14 +49,14 @@ class InputHandler {
   }
 
   _normalize(touch) {
-    // LOW 档低分辨率渲染：触摸坐标是物理像素，需除以 renderScale 映射到逻辑坐标
-    // （canvas.renderScale 由 Main 构造时设置，默认 1 不缩放）
-    const rs = (this.canvas && this.canvas.renderScale) || 1;
-    return {
-      id: touch.identifier,
-      x: (touch.x || touch.clientX || 0) / rs,
-      y: (touch.y || touch.clientY || 0) / rs
-    };
+    // 微信小游戏 touch 事件的 x/y 已经是「逻辑像素」，与渲染逻辑坐标 cw/ch、windowWidth
+    // 同坐标系，**不需要除以 DPR/renderScale**。
+    // 旧代码除以 canvas.renderScale(=dpr) 是错误假设 touch 为物理像素，导致 dpr=2/3 时
+    // 点击落点被缩小 2~3 倍、偏到画面角落，表现为「点击无响应」（开发者工具/真机皆然）。
+    // 浏览器兼容路径传入的 x = clientX - rect.left 也是相对 canvas 的逻辑像素，同样直接使用。
+    const x = (typeof touch.x === 'number') ? touch.x : (touch.clientX || 0);
+    const y = (typeof touch.y === 'number') ? touch.y : (touch.clientY || 0);
+    return { id: touch.identifier, x: x || 0, y: y || 0 };
   }
 
   _handleStart(e) {

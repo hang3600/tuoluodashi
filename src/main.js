@@ -3,16 +3,17 @@
  * - 全链路 try-catch 防崩
  * - 刘海屏/胶囊按钮安全区
  * - 变现护栏：广告位占位直接拦截不发奖
- * - 分享卡片 imageUrl 指向 images/share-card.png
+ * - 分享卡片 imageUrl 指向 images/share-card.jpg
  */
 
 const { GameState, COIN_DRAW_COST } = require('./game');
 const { Renderer } = require('./render');
 const { InputHandler } = require('./input');
 const { Sfx } = require('./audio');
-const { Rewarded, Interstitial } = require('./ads');
+const { Rewarded } = require('./ads');
+const { Subscribe } = require('./subscribe');
 const { CONFIG } = require('./config');
-const { reportBoot } = require('./analytics'); // 零成本埋点：冷启动事件（P1 数据盲区）
+const { reportBoot, reportBattleDefeat } = require('./analytics'); // 零成本埋点：冷启动 / 战败漏斗（P1 数据盲区 / U10）
 // error-handler 用防御式加载：若开发者工具未将其扫进模块图（常见于外部工具新增文件后未重编译），
 // 直接用空兜底，保证启动不崩；重新编译后自动加载真实实现。
 let ErrorHandler;
@@ -101,7 +102,7 @@ class Main {
 
     // LOW 档低分辨率渲染：Canvas 2D 软渲染成本与像素量成正比（荣耀Play5T 11fps / P20 22fps 卡 P0）。
     // 启动时一次性把 canvas 降到低分辨率，微信自动拉伸全屏；
-    // 所有逻辑坐标用 canvas.width/height 自动适配，input 坐标按 renderScale 反缩放。
+    // 所有逻辑坐标用 canvas.width/height 自动适配。注：微信 touch 事件坐标本身是逻辑像素，input 不再反缩放（见 input.js _normalize）。
     // 仅在启动分档时定死，运行时降档不降分辨率（避免动态改 canvas 尺寸闪屏）。
     // LOW 内细分：bl<15 最差机（荣耀Play5T/Helio G25）0.55 倍（-70%），
     // bl 15-25 入门机 0.65 倍（-58%），其余 LOW 0.75 倍（-44%）。
@@ -109,15 +110,17 @@ class Main {
     // ============================================================
     // 【跨平台修复 #3】canvas DPR 超采样（iOS/Android 清晰度统一）
     // 屏幕逻辑像素 = canvas 初始尺寸（game.js 已设为 windowWidth × fullH），作为布局基准恒定不变。
-    // 非 LOW 档启用 DPR 超采样：canvas 物理尺寸 = 逻辑 × dpr（封顶 2，平衡清晰度与内存/纹理上限）；
+    // 非 LOW 档启用 DPR 超采样：canvas 物理尺寸 = 逻辑 × dpr（封顶 1.5，压内存峰值/纹理上限，兼顾清晰度）；
     // 所有绘制坐标保持逻辑像素，由主循环每帧 ctx.setTransform(dpr) 映射到物理像素。
     // LOW 档(最弱机)保持 1x，避免像素量×4致软渲染掉帧雪崩（呼应此前 945MB/卡顿治理）。
-    // input 触摸坐标为物理像素，按 canvas.renderScale(=dpr) 反缩放回逻辑坐标。
+    // 注：原封顶 2x，鉴于高端机(iPhone 14/17)内存峰值 >1.4GB 有 OOM 风险，下调到 1.5x——
+    // 主画布像素量较 2x 降 ~44%，视觉仅略软，内存峰值显著回落（降幅需真机体验分复测确认）。
+    // input 触摸坐标已是逻辑像素（与 cw/ch 同坐标系），无需反缩放；下方 canvas.renderScale 仅保留兼容、input 已不再使用。
     // ============================================================
     this.cw = canvas.width;            // 逻辑宽（布局基准，恒定，不随 DPR 变）
     this.ch = canvas.height;           // 逻辑高
     const _sysDpr = (sysInfo && sysInfo.pixelRatio > 0) ? sysInfo.pixelRatio : 1;
-    const dpr = (this.perfLevel === 'LOW') ? 1 : Math.min(_sysDpr, 2);
+    const dpr = (this.perfLevel === 'LOW') ? 1 : Math.min(_sysDpr, 1.5);
     this.dpr = dpr;
     if (typeof canvas === 'object' && canvas) {
       canvas.dpr = dpr;
@@ -125,7 +128,9 @@ class Main {
       canvas.height = Math.round(this.ch * dpr);
     }
     this.renderScale = dpr;
-    if (typeof canvas === 'object' && canvas) canvas.renderScale = dpr; // input 坐标反缩放（物理→逻辑）
+    // 注：canvas.renderScale 不再用于 input 反缩放（微信 touch 坐标已是逻辑像素，input.js 直接用）。
+    // 保留该字段仅作兼容，避免其他潜在引用在旧逻辑下报错。
+    if (typeof canvas === 'object' && canvas) canvas.renderScale = dpr;
 
     // 胶囊矩形：物理像素 → canvas 逻辑坐标（canvas 逻辑宽 = windowWidth）
     if (this._menuBtnRaw) {
@@ -167,6 +172,7 @@ class Main {
     try {
       ErrorHandler.init({
         gameState: this.game,
+        report: CONFIG.crashReport,   // 运维中心崩溃上报（实时日志 + 计数告警，零后端）
         onError: (errorLog) => {
           // 自定义错误回调：可以在这里添加错误统计、用户提示等
           console.log('[Main] 错误已捕获:', errorLog.source, errorLog.message);
@@ -178,8 +184,15 @@ class Main {
       console.warn('[Main] 错误捕获初始化失败:', e.message);
     }
 
-    // 离线回归奖励：启动时检测离线时长（≥6h 弹回归礼包）
-    try { if (typeof this.game.checkReturn === 'function') this.game.checkReturn(); } catch (e) {}
+    // 离线回归奖励：检测离线时长（≥6h 弹回归礼包）。
+    // 不在启动同步判定 → 回包弹窗延后到首屏渲染完成后（首屏零阻挡）。
+    // 实际判定由 loop() 空闲帧按 _pendingReturnInit 触发一次，见 loop()。
+    this._pendingReturnInit = true;
+    this._bootStartTime = Date.now();
+    // 注：签到面板不再启动期强制弹出（用户反馈：进首页就弹签到体验差，且行业少见）。
+    // 改为玩家主动点「签到」按钮才打开（signin 动作 → signOpen=true）。
+    // 订阅提醒(requestSubscribeMessage)仅在打卡流程内的手势触发：sign_claim / return_claim / adenergy，
+    // 不在首页单独弹窗。autoSignAvailable 纯判定方法仍保留（可用于未来「可签到」红点提示）。
     this.renderer = new Renderer(canvas, ctx, this.game, this.safeTop, this.safeBottom, this.menuBtn);
     this.input = new InputHandler(canvas);
     this.audio = Sfx;
@@ -196,6 +209,10 @@ class Main {
     // 调试/预览钩子：暴露 Main 实例（浏览器预览验证特效用，真机无害）
     try { if (typeof wx !== 'undefined') wx.__bbMain = this; } catch (e) {}
 
+    // 内存告警守卫：低端机（iPhone 7 仅 2GB RAM）在内存紧张时会被系统直接 kill，
+    // 玩家侧就是「玩着玩着闪退」。必须早于任何重资源加载注册。
+    this._setupMemoryGuard();
+
     this.lastTime = 0;
     // 自适应帧率：静态场景 30fps，动态场景（对战/抽卡/特效）60fps
     // 显著降低 iOS 高 CPU 占用，同时保住动态场景流畅度
@@ -208,13 +225,12 @@ class Main {
     this._renderedThisFrame = false; // 本帧是否实际渲染（FPS 监控采样标记）
     this.lastBattleBb = null;
     this._adBusy = false;
-    this._drawAdPending = false; // 抽卡隐藏插屏待弹标志（抽卡成功后置位，收卡时弹出）
     this._fatalCount = 0;
     this._firstFrameRendered = false;
     this._clubGuideChecked = false; // 首帧后只检查一次游戏圈引导
 
-    Rewarded.init(CONFIG.adUnitId);
-    Interstitial.init(CONFIG.interstitialAdUnitId); // 隐藏式抽卡插屏（留空则静默跳过）
+    Rewarded.init({ adUnitId: CONFIG.adUnitId, chestAdUnitId: CONFIG.chestAdUnitId, energyAdUnitId: CONFIG.energyAdUnitId });
+    // 抽卡激励广告位（drawAdUnitId3/6/9/rand）走 Rewarded.show 按 adUnitId 懒加载，无需 init（收卡时由 _dismissDrawCard 自动弹）
 
     this._bindInput();
     this._initShare();
@@ -251,10 +267,9 @@ class Main {
       }
     }
 
-    // 全局错误兜底
-    if (typeof wx !== 'undefined' && wx.onError) {
-      wx.onError((err) => { console.error('[global]', err); });
-    }
+    // 注：全局错误兜底已统一由 ErrorHandler.init 注册的 wx.onError 处理，
+    // 此处不再重复注册第二个 wx.onError（微信多次注册可能覆盖/重复，会把
+    // ErrorHandler 的捕获冲掉或导致双份打印），所有未捕获异常都进 capture()。
 
     // 新玩家首抽延后：不在构造函数里同步抽 6 次（会阻塞首帧、抬高启动耗时），
     // 改为首屏(标题)渲染完成后由 loop 在空闲帧执行（首帧不依赖抽卡结果）。
@@ -367,6 +382,77 @@ class Main {
     } catch (e) {}
   }
 
+  /**
+   * 注册系统内存告警监听（低端机防 OOM 闪退）。
+   *
+   * 背景：iPhone 7 只有 2GB RAM，微信自身已占一大块。系统内存吃紧时，
+   * 若进程不主动释放，会被系统直接 kill —— 玩家看到的就是「玩着玩着闪退」，
+   * 且不带任何 JS 异常，埋点也抓不到。wx.onMemoryWarning 是唯一的提前预警。
+   *
+   * 分级：
+   *  - level 5（轻度）：只清纯计算型缓存，不降档，玩家几乎无感
+   *  - level >= 10（紧张/危险）：强制降到 LOW 档 + 清离屏画布与粒子
+   *
+   * 注意：不锁死 LOW 档。运行时 FPS 监控（loop 内）仍可在帧率确实跑得动时升回，
+   * 避免过度干预让机器一直卡在最低画质。
+   */
+  _setupMemoryGuard() {
+    try {
+      if (typeof wx === 'undefined' || typeof wx.onMemoryWarning !== 'function') return;
+      const self = this;
+      wx.onMemoryWarning(function (res) {
+        // 告警回调可能在任意时机触发（含渲染中途），整体兜 try 避免打断主循环
+        try { self._onMemoryWarning(res && res.level); } catch (e) {}
+      });
+    } catch (e) {}
+  }
+
+  /** 处理一次内存告警：清缓存 → （严重时）强制降档。level 缺失按 10（紧张）处理，宁严勿松。 */
+  _onMemoryWarning(level) {
+    const lv = (typeof level === 'number') ? level : 10;
+    try {
+      // 1) 渲染侧缓存（渐变/文本测量/图鉴签名；lv>=10 追加背景离屏画布与粒子）
+      let freed = {};
+      if (this.renderer && typeof this.renderer._clearMemoryCaches === 'function') {
+        freed = this.renderer._clearMemoryCaches(lv) || {};
+      }
+      // 2) 陀螺 sprite 离屏缓存（最多 60 张小离屏画布，内存大头）。
+      //    懒 require：不增加启动期模块依赖，也规避潜在循环依赖；取不到就跳过，不影响主流程。
+      let spr = 0;
+      try {
+        if (this._bbClearSprite === undefined) {
+          const bb = require('./beyblade');
+          this._bbClearSprite = (bb && typeof bb.clearSpriteCache === 'function') ? bb.clearSpriteCache : null;
+        }
+        if (this._bbClearSprite && lv >= 10) spr = this._bbClearSprite();
+      } catch (e) {}
+      // 2.5) 对战离屏 canvas / 背景图缓存（内存告警时释放，下一帧自修复重建；高端机 OOM 风险主因之一）
+      try {
+        if (this.game && this.game.battle && typeof this.game.battle._clearBattleCaches === 'function') {
+          const bc = this.game.battle._clearBattleCaches();
+          if (typeof bc === 'number' && bc > 0) freed.battle = bc;
+        }
+      } catch (e) {}
+      // 3) 严重告警 → 强制降 LOW 档（复用现成的运行时应用路径，含阴影档同步）
+      let downgraded = false;
+      if (lv >= 10 && this.perfLevel !== 'LOW') {
+        this.perfLevel = 'LOW';
+        this._applyPerfRuntime('memory-warning:lv' + lv);
+        downgraded = true;
+      }
+      // 4) 清 FPS 采样窗口：降档后目标帧率变了，旧样本会误导后续升档判断
+      if (this._fpsWin) this._fpsWin.length = 0;
+
+      console.warn('[mem] warning lv=' + lv
+        + ' freed=' + JSON.stringify(freed)
+        + ' sprite=' + spr
+        + ' perfLevel=' + this.perfLevel
+        + (downgraded ? ' (强制降档)' : ''));
+    } catch (e) {
+      console.warn('[mem] warning handler failed:', e && e.message);
+    }
+  }
+
   _bindInput() {
     this.input.onTap = (p) => {
       try {
@@ -440,16 +526,27 @@ class Main {
                   this._toast('需要两个同品质·同等级陀螺');
                 }
               }
+            } else if (a === 'battle_quick') {
+              this._quickBattle();
+            } else if (a === 'buff') {
+              // 局前增益面板入口（与「对战」直接开战互补的独立按钮）
+              const bb = this.game.selectBattleBeyblade();
+              if (bb) { this.game.buffBb = bb; this.game.buffOpen = true; this.game.buffT = 0; this.audio.play('click'); }
+              else { this._toast('先抽卡或合成一个陀螺'); }
             } else if (a === 'battle') {
               const bb = this.game.selectBattleBeyblade();
               if (bb) { this.game.buffBb = bb; this.game.buffOpen = true; this.game.buffT = 0; this.audio.play('click'); }
               else { this._toast('先抽卡或合成一个陀螺'); }
             } else if (a === 'battle_again') {
-              // 批次D·再战也要门票：不足拦截，足则扣 20 能量
-              if (this.game.energy < 20) { this._toast('能量不足，无法再战'); return; }
-              this.game.energy -= 20;
-              const bb = this.lastBattleBb || this.game.selectBattleBeyblade();
-              if (bb) { this.lastBattleBb = bb; this._chestShown = false; this._startBattle(bb, null, { active: true, stage: 1, buffs: [] }); this.audio.play('clash'); }
+              // #6 核心循环无缝化：连胜中「再战」免 20 能量门票，把连胜串起来，不被能量门槛打断。
+              this._battleAgain();
+            } else if (a === 'ultimate') {
+              // #8 怒气必杀：满怒时 HUD「必杀」按钮触发，全屏演出 + 得分爆发
+              const b = this.game.battle;
+              if (b && typeof b._releaseUltimate === 'function') {
+                const ok = b._releaseUltimate();
+                if (!ok) this._toast('怒气未满，无法释放必杀');
+              }
             } else if (a === 'buff_close') {
               this.game.buffOpen = false;
             } else if (a === 'buff_buy_fullspeed') {
@@ -503,47 +600,53 @@ class Main {
                 if (r.coupon) txt += ' · 传说保底券';
                 this.renderer.addFloatText(this.cw / 2, this.ch * 0.4, txt, '#ffd54f');
                 this._toast(txt);
+                // 高意图手势内请求次日/回归订阅（留存拉回）；会话内仅弹一次，模板未配则静默
+                this._maybePromptSubscribe(['daily', 'offline']);
               }
             }
             else if (a === 'return_close') { this.game.offlineOpen = false; this.game._pendingReturn = null; }
-            else if (a === 'chest_ad') {
-              // 看广告开箱：先播放激励视频广告，广告完成后再开箱
-              if (this._adBusy) return;
+            else if (a === 'chest_open') {
+              // 青铜宝箱「开启」：当日首次免费开；之后每次强制看广告，看完广告才开箱
               if (!this.game.battleChest) { this._toast('没有可开的宝箱'); return; }
-              this._adBusy = true;
-              Rewarded.show({
-                onReward: () => {
-                  this._adBusy = false;
-                  const r = this.game.openBattleChest(true);
-                  if (r) {
-                    this.audio.play('win');
-                    this.renderer.addParticles(this.cw / 2, this.ch * 0.4, '#ffd54f', 30);
-                    this._toast('宝箱开启：' + r.reward.name + (r.reward.type === 'beyblade' ? ' 入账！' : ''));
-                  } else { this._toast('没有可开的宝箱'); }
-                  if (!this.game.battleChest) this.game.battleChestOpen = false;
-                },
-                onFail: (err) => { this._adBusy = false; this.game.chestAdBroken = true; const m = (err && err.errMsg) ? err.errMsg : (err && err.message) ? err.message : ''; this._toast('广告暂不可用' + (m ? '：' + m : '')); },
-                onClose: () => { this._adBusy = false; }
-              });
-            }
-            else if (a === 'chest_free') {
-              const r = this.game.openBattleChest(false);
-              if (r) {
-                this.audio.play('win');
-                this.renderer.addParticles(this.cw / 2, this.ch * 0.4, '#ffd54f', 30);
-                this._toast('宝箱开启：' + r.reward.name + (r.reward.type === 'beyblade' ? ' 入账！' : ''));
-              } else { this._toast('今日直接开已用 · 可看广告开'); }
-              if (!this.game.battleChest) this.game.battleChestOpen = false;
-            }
-            else if (a === 'chest_free_force') {
-              // 广告不可用时的兜底：免费开启（绕过每日 1 次限制），保证不卡死、不流失
-              const r = this.game.openBattleChest(false, true);
-              if (r) {
-                this.audio.play('win');
-                this.renderer.addParticles(this.cw / 2, this.ch * 0.4, '#ffd54f', 30);
-                this._toast('宝箱开启：' + r.reward.name + (r.reward.type === 'beyblade' ? ' 入账！' : ''));
-              } else { this._toast('暂无可开宝箱'); }
-              this.game.battleChestOpen = false;
+              if (this.game.isChestFreeOpenAvailable()) {
+                // 当日首次：免费直接开
+                const r = this.game.openBattleChest(false);
+                if (r) {
+                  this.audio.play('win');
+                  this.renderer.addParticles(this.cw / 2, this.ch * 0.4, '#ffd54f', 30);
+                  this._toast('宝箱开启：' + r.reward.name + (r.reward.type === 'beyblade' ? ' 入账！' : ''));
+                } else { this._toast('宝箱开启失败'); }
+                if (!this.game.battleChest) this.game.battleChestOpen = false;
+              } else {
+                // 非首次：必须先看广告（看完广告后才开箱）。广告不可用则降级免费开，防卡死。
+                if (this._adBusy) return;
+                this._adBusy = true;
+                Rewarded.show({
+                  adUnitId: CONFIG.chestAdUnitId,
+                  onReward: () => {
+                    this._adBusy = false;
+                    const r = this.game.openBattleChest(true);
+                    if (r) {
+                      this.audio.play('win');
+                      this.renderer.addParticles(this.cw / 2, this.ch * 0.4, '#ffd54f', 30);
+                      this._toast('宝箱开启：' + r.reward.name + (r.reward.type === 'beyblade' ? ' 入账！' : ''));
+                    } else { this._toast('没有可开的宝箱'); }
+                    if (!this.game.battleChest) this.game.battleChestOpen = false;
+                  },
+                  onFail: (err) => {
+                    this._adBusy = false; this.game.chestAdBroken = true;
+                    // 降级兜底：广告拉不到也允许免费开启，避免玩家卡在弹窗（与历史 chest_free_force 一致）
+                    const r = this.game.openBattleChest(false, true);
+                    if (r) {
+                      this.audio.play('win');
+                      this.renderer.addParticles(this.cw / 2, this.ch * 0.4, '#ffd54f', 30);
+                      this._toast('广告暂不可用 · 已免费开启：' + r.reward.name);
+                    } else { this._toast('暂无可开宝箱'); }
+                    if (!this.game.battleChest) this.game.battleChestOpen = false;
+                  },
+                  onClose: () => { this._adBusy = false; }
+                });
+              }
             }
             else if (a === 'chest_close') {
               // 无论广告是否可用，用户随时可关闭弹窗返回游戏（防卡死底线）
@@ -601,12 +704,19 @@ class Main {
               } else { this._toast('活跃度未满或今日已领取'); }
             }
             else if (a === 'inv_prev') {
-              if (this.game.invPage > 0) { this.game.invPage--; this.audio.play('click'); }
+              // 陈列轨道模式：翻页改为按屏横向滚动（网格模式仍走 invPage）
+              if (this.renderer.invRailV2On && this.renderer.invRailV2On()) {
+                this.renderer.scrollInventoryByScreen(-1); this.audio.play('click');
+              } else if (this.game.invPage > 0) { this.game.invPage--; this.audio.play('click'); }
             } else if (a === 'inv_next') {
-              const L = this.renderer.layout;
-              const cap = Math.max(1, L.invCols * this.renderer.inventoryRowsMax());
-              const pages = Math.max(1, Math.ceil(this.game.getFilteredInventory().length / cap));
-              if (this.game.invPage < pages - 1) { this.game.invPage++; this.audio.play('click'); }
+              if (this.renderer.invRailV2On && this.renderer.invRailV2On()) {
+                this.renderer.scrollInventoryByScreen(1); this.audio.play('click');
+              } else {
+                const L = this.renderer.layout;
+                const cap = Math.max(1, L.invCols * this.renderer.inventoryRowsMax());
+                const pages = Math.max(1, Math.ceil(this.game.getFilteredInventory().length / cap));
+                if (this.game.invPage < pages - 1) { this.game.invPage++; this.audio.play('click'); }
+              }
             } else if (a === 'inv_page') {
               this._toast('点左右箭头翻页 · 长按陀螺可出售');
             } else if (a === 'sign_claim') {
@@ -621,6 +731,8 @@ class Main {
                 this._toast('签到成功：' + txt.trim());
                 // 签到成功后自动关闭签到面板，回到主界面后光晕不再闪
                 this.game.signOpen = false;
+                // 高意图手势内请求次日订阅（留存拉回）；会话内仅弹一次，模板未配则静默
+                this._maybePromptSubscribe(['daily']);
               }
             } else if (a === 'refill') {
               if (this.game.freeRefill()) {
@@ -633,10 +745,12 @@ class Main {
               if (!this.game.canWatchAdEnergy()) { this._toast('今日广告次数已用完'); return; }
               this._adBusy = true;
               Rewarded.show({
+                adUnitId: CONFIG.energyAdUnitId,
                 onReward: () => {
                   this.game.watchAdEnergy(); this.audio.play('click');
                   this.renderer.addFloatText(this.cw - 70, 30 + this.safeTop, '能量 +60', '#00e676');
                   this._toast('看广告能量 +60');
+                  this._maybePromptSubscribe(['energy']); // 高意图手势：刚拿到能量，顺带请求体力恢复提醒
                 },
                 onFail: () => { this._adBusy = false; this._toast('广告暂不可用'); },
                 onClose: () => { this._adBusy = false; }
@@ -658,7 +772,7 @@ class Main {
             break;
           }
           case 'tab': this.game.view = hit.view; this.audio.play('click'); break;
-          case 'filter': this.game.filterTier = hit.tierIndex; this.game.invPage = 0; break;
+          case 'filter': this.game.filterTier = hit.tierIndex; this.game.invPage = 0; this.renderer.invScrollX = 0; break;
           case 'platform': this.game.takeFromPlatform(hit.index); break;
           case 'inventory': {
             const emptyIdx = this.game.platformSlots.findIndex(s => s === null);
@@ -670,12 +784,26 @@ class Main {
     };
 
     let dragSource = null;
+    let invDrag = null;          // 背包轨道滑动候选：{ x0, y0, mode, lastX, vel, scrollStart }
+    this._invDragging = false;   // 是否正在横滑背包轨道（控制惯性是否暂停）
     this.input.onDragStart = (t) => {
       try {
         // 按下瞬间触发按钮按下态（0.94 微缩 + 下沉），松手/点击后释放
         this.renderer.pressAt(t.x, t.y);
         if (this.game.mode === 'battle' && this.game.battle && this.game.battle.phase === 'playing') {
           this.game.battle.whipStart(t.x, t.y); return;
+        }
+        // 主页背包陈列轨道：手指落在轨道上 → 候选横滑/拎起（横向滑动浏览，纵向向上拎起放到合成台）
+        if (this.renderer.invRailV2On() && this.renderer.invMaxScroll() > 0) {
+          const rr = this.renderer.invRailRect();
+          if (t.x >= rr.x && t.x <= rr.x + rr.w && t.y >= rr.y && t.y <= rr.y + rr.h) {
+            const hit = this.renderer.hitTest(t.x, t.y);
+            if (!hit || hit.type === 'inventory') {
+              invDrag = { x0: t.x, y0: t.y, mode: null, lastX: t.x, vel: 0, scrollStart: this.renderer.invScrollX };
+              if (hit && hit.type === 'inventory') dragSource = hit.beyblade;
+              return; // 方向待定，先不入通用 carry
+            }
+          }
         }
         const hit = this.renderer.hitTest(t.x, t.y);
         if (hit && hit.type === 'inventory') {
@@ -691,6 +819,27 @@ class Main {
           this.game.battle.whipMove(t.x, t.y); return;
         }
         const t = touches[0];
+        if (invDrag && t) {
+          const dx = t.x - invDrag.x0;
+          const dy = t.y - invDrag.y0;
+          // 方向判定（阈值 8px、取主导轴）：横向 → 滑动浏览；纵向向上 → 拎起放到合成台
+          if (!invDrag.mode) {
+            if (Math.abs(dx) > 8 && Math.abs(dx) >= Math.abs(dy)) invDrag.mode = 'scroll';
+            else if (dy < -8 && Math.abs(dy) > Math.abs(dx)) invDrag.mode = 'carry';
+          }
+          if (invDrag.mode === 'scroll') {
+            this._invDragging = true;
+            const maxScroll = this.renderer.invMaxScroll();
+            this.renderer.invScrollX = Math.max(0, Math.min(maxScroll, invDrag.scrollStart - dx));
+            const v = t.x - invDrag.lastX;
+            invDrag.vel = invDrag.vel * 0.6 + v * 0.4; // 平滑速度，供松手惯性
+            invDrag.lastX = t.x;
+          } else if (invDrag.mode === 'carry') {
+            if (!this.renderer.drag && dragSource) this.renderer.drag = { beyblade: dragSource, x: t.x, y: t.y };
+            if (this.renderer.drag) { this.renderer.drag.x = t.x; this.renderer.drag.y = t.y; }
+          }
+          return;
+        }
         if (this.renderer.drag && t) { this.renderer.drag.x = t.x; this.renderer.drag.y = t.y; }
       } catch (e) { console.warn('[dragMove]', e); }
     };
@@ -699,6 +848,19 @@ class Main {
         this.renderer.releasePressedBtn();
         if (this.game.mode === 'battle' && this.game.battle && this.game.battle.phase === 'playing' && this.game.battle.isWhipping) {
           this.game.battle.whipEnd(t.x, t.y); return;
+        }
+        if (invDrag) {
+          this._invDragging = false;
+          if (invDrag.mode === 'scroll') {
+            // 松手惯性：把平滑速度交 renderer 每帧衰减（_stepInvInertia）
+            this.renderer._invVel = Math.max(-40, Math.min(40, invDrag.vel * 1.1));
+          } else if (invDrag.mode === 'carry') {
+            const hit = this.renderer.hitTest(t.x, t.y);
+            if (hit && hit.type === 'platform') { this.game.placeOnPlatform(hit.index, dragSource); }
+          }
+          this.renderer.drag = null;
+          invDrag = null; dragSource = null;
+          return;
         }
         if (!this.renderer.drag) return;
         const hit = this.renderer.hitTest(t.x, t.y);
@@ -770,7 +932,7 @@ class Main {
     // 之前写错成 withShareTicket，导致转发按钮大概率不显示，直接砍掉分享裂变入口。
     if (wx.onShareAppMessage) {
       wx.onShareAppMessage(() => ({
-        title: '陀螺大师 - 合成传说陀螺，来挑战我！',
+        title: '陀螺大师｜免费抽陀螺，合成传说来对战！',
         query: 'from=share',
         imageUrl: CONFIG.shareCardImage
       }));
@@ -778,7 +940,7 @@ class Main {
     // 朋友圈转发（防御式：仅当平台支持时注册）
     if (wx.onShareTimeline) {
       wx.onShareTimeline(() => ({
-        title: '陀螺大师 - 指尖合成陀螺，单手就能玩',
+        title: '陀螺大师｜免费合成传说陀螺，单手就能玩',
         query: 'from=share',
         imageUrl: CONFIG.shareCardImage
       }));
@@ -814,7 +976,7 @@ class Main {
   _share() {
     if (typeof wx !== 'undefined' && wx.shareAppMessage) {
       wx.shareAppMessage({
-        title: '陀螺大师 - 合成传说陀螺，来挑战我！',
+        title: '陀螺大师｜免费抽陀螺，合成传说来对战！',
         query: 'from=share',
         imageUrl: CONFIG.shareCardImage
       });
@@ -836,7 +998,7 @@ class Main {
     const streak = this.game.winStreak || 1;
     if (typeof wx !== 'undefined' && wx.shareAppMessage) {
       wx.shareAppMessage({
-        title: '我在陀螺大师连胜 x' + streak + '，得分 ' + score + '/' + target + '，敢来挑战吗？',
+        title: '我在陀螺大师连胜 x' + streak + '，免费合成传说陀螺，敢来挑战吗？',
         query: 'from=share',
         imageUrl: CONFIG.shareCardImage
       });
@@ -858,7 +1020,7 @@ class Main {
     const pityBefore = { epic: this.game.pityEpic || 0, legend: this.game.pityLegend || 0 };
     const bb = this.game.draw(useCoins, free);
     if (bb) {
-      // 隐藏式抽卡插屏：累计抽数 + 安排待弹（第3/6/9抽必弹 + 随机补）
+      // 隐藏式抽卡插屏：累计抽数 + 安排待弹（按抽数选 draw3/draw6/draw9/rand2 独立位）
       this.game.drawsSinceAd++;
       this._maybeScheduleDrawAd();
     }
@@ -900,6 +1062,22 @@ class Main {
     return bb;
   }
 
+  // 在高意图手势（签到成功 / 领回归礼包）后请求订阅消息，拉回次日留存。
+  // 按模板类型分别守卫（会话内每种类型最多弹一次），避免重复骚扰；
+  // daily/energy/offline 互不阻塞，确保三个订阅场景都能在各自「高意图手势」内弹出。
+  // 模板未配置 / 无 wx / 无 API 时由 Subscribe.request 静默 no-op。
+  _maybePromptSubscribe(types) {
+    try {
+      if (typeof Subscribe === 'undefined') return;
+      const list = (types && types.length) ? types : ['daily'];
+      if (!this._subscribedTypes) this._subscribedTypes = {};
+      const pending = list.filter(t => !this._subscribedTypes[t]);
+      if (pending.length === 0) return;
+      pending.forEach(t => { this._subscribedTypes[t] = true; });
+      Subscribe.request(pending);
+    } catch (e) {}
+  }
+
   _toast(msg) {
     try {
       if (typeof wx !== 'undefined' && wx.showToast) {
@@ -911,26 +1089,35 @@ class Main {
   }
 
   /**
-   * 抽卡隐藏插屏：抽卡成功后调用，决定是否"待弹"。
-   * 规则层（每3抽必弹+随机补、每日上限）在 game.shouldScheduleDrawInterstitial()；
-   * 这里补平台最小间隔守卫(Interstitial.canShow)，通过则置待弹标志。
+   * 抽卡激励广告：抽卡成功后调用，决定是否安排「收卡时自动弹出」的激励视频。
+   * 规则层（每3抽必弹+随机补、每日上限）在 game.shouldScheduleDrawInterstitial()。
+   * 这里把命中的广告位 key 记到 game._drawRewardKey；收卡时由 _dismissDrawCard 自动弹出激励视频（隐藏式、无按钮）。
    */
   _maybeScheduleDrawAd() {
-    if (this._drawAdPending) return;                   // 已有待弹，不叠加
-    if (!Interstitial.canShow()) return;              // 平台最小间隔/无能力/未配ID
-    if (this.game.shouldScheduleDrawInterstitial()) this._drawAdPending = true;
+    if (this.game._drawRewardKey) return;               // 已有待看广告位，不叠加
+    const key = this.game.shouldScheduleDrawInterstitial(); // 返回位 key 或 null（抽卡激励广告位）
+    if (!key) return;                                  // 本次抽卡不安排广告
+    this.game._drawRewardKey = key;                    // 收卡时据此自动弹出对应激励视频位
   }
 
-  /** 收卡时调用：关闭抽卡动画，并在有待弹插屏时自动弹出（隐藏式、无选择）。 */
+  /**
+   * 收卡时调用：关闭抽卡动画，并在本次抽卡命中广告位时自动弹出激励视频。
+   * 等同原「隐藏插屏」行为（无按钮、无选择、玩家无感），但改用激励视频广告位：
+   * 抽卡流程中点第3/6/9抽（及循环、逢2随机）收卡后直接弹激励视频，看完计当日上限。
+   * 触发链：收卡这一下本身是用户点击手势 → Rewarded.show 在其内同步调用（ad.load().then(show) 在手势窗口内）→ 满足微信激励视频需用户手势触发的要求。
+   */
   _dismissDrawCard() {
+    const adKey = this.game._drawRewardKey;
     this.game.drawCard = null;
-    if (!this._drawAdPending) return;
-    this._drawAdPending = false;
-    Interstitial.show({
-      // 实际展示成功 → 计每日上限
-      onShown: () => { this.game.markDrawInterstitialShown(); },
-      // 未展示（被平台频控吞掉/加载失败/能力缺失）→ 本次不计数，静默跳过
-      onSkip: () => {}
+    this.game._drawRewardKey = null; // 收卡即消费该次广告位
+    if (!adKey) return;
+    const unitMap = { draw3: CONFIG.drawAdUnitId3, draw6: CONFIG.drawAdUnitId6, draw9: CONFIG.drawAdUnitId9, rand2: CONFIG.drawAdUnitIdRand };
+    const unit = unitMap[adKey];
+    if (!unit) return;
+    Rewarded.show({
+      adUnitId: unit,
+      onReward: () => {}, // 看完：纯曝光，不额外发奖（等同原隐藏插屏）
+      onClose: (ended) => { if (ended) this.game.markDrawInterstitialShown(); } // 计当日抽卡广告上限
     });
   }
 
@@ -984,6 +1171,16 @@ class Main {
   }
 
   // 批次D·局前 buff 确认：校验金币/能量门槛 → 扣费 → 开战
+  /** #11 首屏可玩：一键开战 —— 主按钮直接进入战斗，跳过局前增益面板。
+   *  增益降级为右侧可选小按钮（action 'battle'），点了才打开增益面板。
+   *  开战前的校验（陀螺 / 20 能量门票）完全沿用 _confirmBattleBuff，不绕过任何规则。 */
+  _quickBattle() {
+    const bb = this.game.selectBattleBeyblade();
+    if (!bb) { this._toast('先抽卡或合成一个陀螺'); return; }
+    this.game.buffBb = bb;
+    this._confirmBattleBuff(null);   // null = 不带增益，直接开战
+  }
+
   _confirmBattleBuff(buff) {
     const cost = buff ? this._buffCost(buff) : 0;
     if (buff && this.game.coins < cost) { this._toast('金币不足'); return; }
@@ -1006,6 +1203,30 @@ class Main {
     if (buff === 'targetdown') return 500;
     if (buff === 'doublepower') return 800;
     return 0;
+  }
+
+  // #6 核心循环无缝化：结算页「再战」——连胜中免 20 能量门票，把连胜串起来不被能量门槛打断；
+  // 连胜断了（上一局失败）重新开始则照常扣门票，经济规则不变。
+  // 难度由 stage 驱动递增（spintop._diffFactor：stage<=3 为 0.45，4 为 0.62，之后渐增至 0.78 封顶），
+  // 故连胜越久越难，天然收敛，不会出现「免门票 + 难度不变」的无限刷。
+  // 原 in-line 分支漏设 this.game.mode = 'battle' 且每次扣门票、固定 stage:1（最低难度，免门票会无限刷），
+  // 现统一为：连胜免门票 + stage 随连胜递增 + 显式战斗态 + 存档。
+  _battleAgain() {
+    const streak = this.game.winStreak || 0;
+    const freeContinue = streak >= 1;
+    if (!freeContinue) {
+      if (this.game.energy < 20) { this._toast('能量不足，无法再战'); return; }
+      this.game.energy -= 20;
+    }
+    const bb = this.lastBattleBb || this.game.selectBattleBeyblade();
+    if (bb) {
+      this.lastBattleBb = bb;
+      this._chestShown = false;
+      this._startBattle(bb, null, { active: true, stage: streak + 1, buffs: [] });
+      this.game.mode = 'battle';     // 原分支漏设，靠 mode 仍为 battle 侥幸工作
+      this.audio.play('clash');
+      if (typeof this.game.save === 'function') { try { this.game.save(); } catch (e) {} }
+    }
   }
 
   // 判断当前是否需要高帧率（动态场景）：对战、抽卡动画、签到面板、存活粒子特效
@@ -1083,6 +1304,11 @@ class Main {
       if (this._pendingNewPlayerInit && this.renderer._frameCount >= 2) {
         this._initNewPlayer(); // 方法内部会复位 _pendingNewPlayerInit
       }
+      // 回归礼包判定延后到首屏后（首屏零阻挡）：启动 ~1s 后无弹窗才触发一次，避免回包叠首屏
+      if (this._pendingReturnInit && (now - this._bootStartTime) >= 1000) {
+        this._pendingReturnInit = false;
+        try { if (typeof this.game.checkReturn === 'function') this.game.checkReturn(); } catch (e) {}
+      }
 
       if (this._curFps >= 60) {
         // 动态场景：全速渲染
@@ -1158,6 +1384,8 @@ class Main {
 
   update(dt) {
     try { this.game.rechargeEnergy(dt); } catch (e) { console.warn('[energy]', e); }
+    // 背包陈列轨道：非拖拽时每帧推进松手惯性（_stepInvInertia 内部钳制 + 衰减）
+    if (!this._invDragging) this.renderer._stepInvInertia();
     // 推进抽卡动画时间
     if (this.game.drawCard) this.game.drawCard.t += dt;
     // 签到面板入场动画计时：关闭即归零，每次打开重新播放入场
@@ -1220,7 +1448,9 @@ class Main {
               }
             } else {
               this.audio.play('lose');
+              reportBattleDefeat(this.game.battle.runStage); // 零成本埋点：战败漏斗（关卡维度）
             }
+            this.game.onBattleEnd(this.game.battle.result === 'win'); // 首程引导收口：首胜即完成；连败 3 场兜底收起
             this._resultPlayed = true;
           }
         } else {

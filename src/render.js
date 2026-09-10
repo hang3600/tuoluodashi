@@ -8,11 +8,31 @@
  */
 
 const { drawBeyblade, TIERS, Beyblade } = require('./beyblade');
-const { isPointInRect, formatNumber, drawVectorIcon, prepSrc: _prepSrc } = require('./utils');
+const { isPointInRect, formatNumber, drawVectorIcon, prepSrc: _prepSrc, loadOne: _loadOne, downscaleToCap } = require('./utils');
 const { CONFIG } = require('./config');
 const { SIGN_REWARDS } = require('./game');
 
+// 图鉴筛选条短名映射（仅当按钮宽度不足放全名时取首字）。提升为模块级常量，避免每帧重建对象。
+const CODEX_FILT_SHORT = { '土·普通': '土', '木·稀有': '木', '水·史诗': '水', '火·精英': '火', '金·传说': '金' };
+// 图鉴筛选条名称数组（仅随 fullName 布尔变化，与布局无关）→ 模块级 memo，避免每帧 TIERS.map 新建数组。
+const CODEX_FILT_NAMES = {
+  true: ['全部', ...TIERS.map(t => t.name)],
+  false: ['全', ...TIERS.map(t => (CODEX_FILT_SHORT[t.name] || t.name.charAt(0)))],
+};
+
+// 主页宇宙星海战场背景贴图（AI 生成，内嵌 base64）。
+// 与竞技场同机制：模拟器走 data URI（零 HTTP，不踩 404），真机写 USER_DATA_PATH。
+const _HOME_B64 = (function () { try { return require('./homebg'); } catch (e) { return null; } })();
+// 图鉴独立背景：暗调陈列星图，与主页「宇宙星海战场」区分，且更静更暗以承载 25 只陀螺密集网格。
+const _CODEX_B64 = (function () { try { return require('./codexbg'); } catch (e) { return null; } })();
+
 const APPLE_FONT = '-apple-system, BlinkMacSystemFont, "SF Pro Text", "SF Pro Display", "PingFang SC", "Helvetica Neue", sans-serif';
+
+// 背景图解码封顶（U10-C）：LOW 档降到 540p 省解码内存，其余维持 720p。
+// 纯函数，便于无头测试。
+function capForLevel(perfLevel) {
+  return (perfLevel === 'LOW') ? 540 : 720;
+}
 
 // 模态面板遮罩透明度统一（P2-7）：原 0.72/0.78/0.80/0.82 四种散落各处，统一为单一常量
 const PANEL_MASK_ALPHA = 0.82;
@@ -21,11 +41,26 @@ const PANEL_MASK = 'rgba(10,5,25,' + PANEL_MASK_ALPHA + ')';
 // 静态/重复文本测量缓存：measureText 依赖 ctx.font，按 font+text 做 Map 缓存，
 // 避免内容恒定的按钮名/标签每帧重复排版计算（P1-8-4）。
 const _mtCache = new Map();
+const MT_CACHE_MAX = 256;
 function mtW(ctx, text) {
   const k = ctx.font + '' + text;
   let v = _mtCache.get(k);
-  if (v === undefined) { v = ctx.measureText(text).width; _mtCache.set(k, v); }
+  if (v === undefined) {
+    v = ctx.measureText(text).width;
+    _mtCache.set(k, v);
+    if (_mtCache.size > MT_CACHE_MAX) {
+      // Map 迭代序=插入序，删除最旧条目实现 LRU（key 含动态串，须封顶防无界增长）。
+      _mtCache.delete(_mtCache.keys().next().value);
+    }
+  }
   return v;
+}
+
+/** 内存告警时清空 measureText 缓存（纯计算缓存，清掉只是重新测量，视觉零变化）。@returns {number} 释放条目数 */
+function clearMeasureTextCache() {
+  const n = _mtCache.size;
+  _mtCache.clear();
+  return n;
 }
 
 class Renderer {
@@ -86,6 +121,8 @@ class Renderer {
     // 诊断高频GC是卡顿主因之一，按钮是每帧创建最多的对象类型
     this._buttonPool = [];
     this.gridRects = [];
+    this.invScrollX = 0;      // 陈列轨道横向滚动偏移（V2 陈列模式使用）
+    this._invVel = 0;         // 陈列轨道松手惯性速度（px/帧，每帧由 _stepInvInertia 衰减）
     this.platformRects = [];
     this.filterRects = [];
     this.tabRects = [];
@@ -101,6 +138,11 @@ class Renderer {
     this._bgCache = null;
     this._bgCacheKey = null;
     this._layoutSig = null;
+    // 主页 AI 场景背景：懒加载一次，加载完成后作废 _bgCache 触发重烘焙
+    this._homeBgImage = null;
+    this._codexBgImage = null;
+    this._codexBgTried = false;
+    this._homeBgTried = false;
     // 低端机 / iOS shadow 降级档：软投影是 Canvas2D 最贵绘制路径。
     // auto 按 compact（小屏低端）或 iOS（WebKit 软件渲染阴影极贵，无 GPU 加速）判定；
     // 并允许 game.lowFX 强制 0/1 覆盖。
@@ -126,6 +168,8 @@ class Renderer {
     } catch (e) {}
     // 高频渐变缓存（能量条 / 平台底板等每帧重建的渐变），降低每帧分配与 GC
     this._gradCache = new Map();
+    // 图鉴格子 Beyblade 实例缓存：按 "tier:level" 复用，避免每帧每格 new（约30次/帧）且构造随机 angle 致抖动
+    this._codexBbCache = {};
 
     this.stars = [];
     let seed = 1234.5678;
@@ -203,6 +247,10 @@ class Renderer {
     // ==========================================================
     const contentH = H - ST - SB;
     let compact = contentH < 650 || W < 370;
+    // V2 主场景（游戏化骨架）：顶栏更薄、去掉「游戏名+副标题」大标题区（只留视图切换条）、
+    // 主操作按钮更高 —— 省下的纵向空间全部让给 Arena 舞台（合成台圆盘）。
+    // 与旧大厅并存，game.homeV2 = false 即完整回退。
+    const v2 = this.game.homeV2 !== false;   // 默认开启；game.homeV2 = false 完整回退旧大厅
 
     // ==========================================================
     // 安卓机型特殊适配：
@@ -222,7 +270,7 @@ class Renderer {
     // ==========================================================
     // 区域 1 · TopBar（胶囊下方气隙后第一行：左金币 / 中能量条居中 / 右图标组）
     // ==========================================================
-    const topBarH = (compact ? 42 : 46);
+    const topBarH = v2 ? (compact ? 38 : 40) : (compact ? 42 : 46);
     const topBarY = ST + 8;
     const leftPad = 16, rightPad = 16; // rightPad 12→16，能量条和右侧图标间距增加4px，呼吸感更好
     const signBtnW = compact ? 46 : 52;
@@ -259,14 +307,14 @@ class Renderer {
     const titleTabGap = compact ? 0 : 0; // Tab间距设为0（最小合理值）
     const titleTabH = (compact ? 26 : 28);
     const titleFootGap = 1;
-    const titleH = titleInnerHeadGap + titleTitleSize + titleSubGap + titleSubLineH + titleTabGap + titleTabH + titleFootGap;
+    const titleH = v2 ? (titleTabH + 6) : (titleInnerHeadGap + titleTitleSize + titleSubGap + titleSubLineH + titleTabGap + titleTabH + titleFootGap);
     // Tab：SE 从 76→72；同时按 W 均分，不居中留白太多
     const tabBaseW = compact ? 72 : 76;
     const tabTotalGap = 16;
     const tabW = Math.min(tabBaseW, Math.max(68, Math.floor((W - 40 - tabTotalGap) / 2)));
-    const tabY = titleY + titleInnerHeadGap + titleTitleSize + titleSubGap + titleSubLineH + titleTabGap;
+    const tabY = v2 ? (titleY + 3) : (titleY + titleInnerHeadGap + titleTitleSize + titleSubGap + titleSubLineH + titleTabGap);
     // Title↔Arena 气隙：SE 从 8→4（圆盘自己有 12 阴影，不会看起来贴标题）
-    const titleArenaGap = compact ? 4 : 12;
+    const titleArenaGap = v2 ? (compact ? 8 : 16) : (compact ? 4 : 12);
 
     // ==========================================================
     // 区域 4 · ActionBar（对战 / 合成）· 自底向上预算高度
@@ -274,7 +322,7 @@ class Renderer {
     // 区域 6 · Inventory · 保底 2 行；先按「软 cell/gap」估预算，若 2 行会越安全区 → 缩 cell 仍保≥44，再缩 gap 保≥6，最后缩 sbPeg 气隙。
     //                    目标不等式：invY + 2*cell + gap ≤ invMaxBottom（2行底 = y + rowStep*2 - gap）
     // ==========================================================
-    const actionBtnH = compact ? 34 : 40;
+    const actionBtnH = v2 ? (compact ? 44 : 52) : (compact ? 34 : 40);
     const filterH = compact ? 28 : 38;
     const GAP1 = (compact ? 6 : 10);
     const GAP2 = (compact ? 6 : 10);
@@ -301,7 +349,8 @@ class Renderer {
       const bf = makeBottomFixed(gap, cell, peg);
       const maxArenaBottom = H - SB - bf;
       const minArenaY0 = titleY + titleH + titleArenaGap;
-      const arenaDiameterMaxW = Math.min(W - 48, Math.max(284, Math.floor(W * 0.72)));
+      const arenaDiameterMaxW = v2 ? Math.min(W - 32, Math.max(300, Math.floor(W * 0.82)))
+                                   : Math.min(W - 48, Math.max(284, Math.floor(W * 0.72)));
       const arenaH = Math.max(mah, Math.min(maxArenaBottom - minArenaY0 - 2 * ARENA_BREATH, arenaDiameterMaxW));
       const arenaY = minArenaY0 + Math.max(0, Math.floor((maxArenaBottom - minArenaY0 - arenaH) / 2));
       const actionY2 = arenaY + arenaH + ARENA_ACTION_GAP;
@@ -351,7 +400,8 @@ class Renderer {
     const bottomFixed = BOTTOM_COSTS.arenaGap + BOTTOM_COSTS.action + BOTTOM_COSTS.gap1 + BOTTOM_COSTS.filter
                       + BOTTOM_COSTS.gap2 + BOTTOM_COSTS.inv + BOTTOM_COSTS.sbPeg;
     // Arena 上限：W 的 72%（大屏放大不再死卡 284），但至少 210
-    const arenaDiameterMaxW = Math.min(W - 48, Math.max(284, Math.floor(W * 0.72)));
+    const arenaDiameterMaxW = v2 ? Math.min(W - 32, Math.max(300, Math.floor(W * 0.82)))
+                                 : Math.min(W - 48, Math.max(284, Math.floor(W * 0.72)));
 
     // ==========================================================
     // 区域 3 · Arena（合成台）— 大圆盘严格在Tab行底部和操作按钮行顶部的中间位置
@@ -413,10 +463,21 @@ class Renderer {
     // 图鉴：品质标签单独一行（上面），陀螺图标单独一行（下面），5个陀螺占满整个宽度并放大
     // 每个品质占用两行：品质标签行 + 陀螺行
     // 右端严格等式：gridStartX(12) + 5*codexCell + 4*codexGap + codexRightPad == W
-    // 顶部内容（标题/进度条/横幅）增加呼吸感，codexStartY 额外+40（整个陀螺区域再往下移5px）
+    // 图鉴头部独立带：位于 Tab 条下方、与 Tab 不重叠，给足呼吸感（修复上半部分标题/进度条与 Tab 叠压遮挡）
+    // 旧版 codex 标题锚在 titleY+2，与 Tab 条(titleY+3)同 Y 叠压、进度条又贴着 Tab 底 → 上半部分遮挡拥挤
     // ==========================================================
-    const codexStartY = titleY + titleH + 40;
-    const codexUsableBottom = H - SB - 12;
+    const codexTabGap = 16;                                          // Tab 条 ↔ 图鉴标题 间距（呼吸感）
+    const codexHeaderTop = tabY + titleTabH + codexTabGap;          // 图鉴标题顶（baseline-top）
+    const codexTitleH = 22;                                         // 标题 18px 字 + 余量
+    const codexProgGap = 12;                                        // 标题 ↔ 进度条 间距
+    const codexProgH = 10;                                          // 进度条高 + 百分比行
+    const codexHeaderBottom = codexHeaderTop + codexTitleH + codexProgGap + codexProgH;
+    const codexHeadBreath = 16;                                     // 头部 ↔ 陀螺网格 间距（额外呼吸）
+    const codexStartY = codexHeaderBottom + codexHeadBreath;
+    const codexProgY = codexHeaderTop + codexTitleH + codexProgGap;
+    // 底部预留阶段奖励细条带（codexFooterH），网格整体让出此高度，避免与底部奖励带重叠
+    const codexFooterH = 52;
+    const codexUsableBottom = H - SB - 12 - codexFooterH;
     // 每个品质两行（品质标签+陀螺），行高最小值68px（原72→68，再收缩一点）
     const codexRowH = Math.max(68, Math.floor((codexUsableBottom - codexStartY) / TIERS.length));
     const codexLabelW = 0;                         // 品质标签在上面，不占用水平空间
@@ -456,7 +517,8 @@ class Renderer {
       // 区域 6
       invY, invMaxBottom, invCols, invGap, invCell, invStartX, invRowsMax: rowsMax, invRowStep,
       // 图鉴
-      codexStartY, codexRowH, codexLabelW, codexLeftPad, codexRightPad, codexGap, codexCell: codexCellFinal, codexGridStartX,
+      codexStartY, codexRowH, codexLabelW, codexLeftPad, codexRightPad, codexGap, codexCell: codexCellFinal, codexGridStartX, codexFooterH,
+      codexHeaderTop, codexHeaderBottom, codexProgY,
       // 给开发校验用：bottom 预算 / arena 预算
       _bottomFixed: bottomFixed,
       _arenaBudget: maxArenaBottom - minArenaY,
@@ -524,6 +586,14 @@ class Renderer {
     return g;
   }
 
+  /** 渐变缓存的 ctx 安全封装：仅当 ctx 为主画布（this.ctx）才入共享 _gradCache。
+   *  离屏/其它 ctx 创建的 CanvasGradient 不能跨 ctx 复用（会渲染异常），故非主 ctx 时直接创建不入缓存。
+   *  _drawHomeScene/_drawCodexScene 既被主视图每帧调用（this.ctx），也可能在离屏烘焙分支被 bctx 调用。 */
+  _gradFor(ctx, key, create) {
+    if (ctx === this.ctx) return this._grad(key, create);
+    return create();
+  }
+
   _shadeColor(hex, amt) {
     const h = (hex || '#888888').replace('#', '');
     let r = parseInt(h.substring(0, 2), 16) || 0;
@@ -575,14 +645,69 @@ class Renderer {
     ctx.textBaseline = 'top';
     ctx.fillStyle = 'rgba(209,196,233,0.9)';
     ctx.font = '13px ' + APPLE_FONT;
-    ctx.fillText('收集 · 合成 · 对战', W / 2, ty);
+    ctx.fillText('抽陀螺 · 合成传说 · 单手对战', W / 2, ty);
   }
 
   /**
-   * 静态背景（渐变 + 星星）：首次渲染到离屏画布缓存，之后每帧仅一次 drawImage。
-   * 大幅降低每帧 createLinearGradient + 26 个 arc 的绘制指令（诊断 drawcall 178 的主因之一）。
+   * 静态背景：AI 宇宙星海场景图 cover-fit 铺底 + 上下暗角（优先）；无图/未加载/老设备回退渐变 + 星点。
+   * 首次（或图就绪后）烘焙到离屏画布缓存，之后每帧仅一次 drawImage。
    * 离屏创建失败时自动回退为逐帧绘制，保证兼容性（微信小游戏 / 老基础库）。
    */
+  /**
+   * 内存告警时释放可重建缓存（低端机防 OOM 被系统 kill，iPhone 7 仅 2GB RAM 尤甚）。
+   *
+   * 分两级，避免「一告警就把画面搞花」：
+   *  - 任何等级都清：**纯计算型缓存**（渐变/文本测量/图鉴陀螺签名/布局签名）。
+   *    清掉只是重新计算，视觉零变化，代价极小。
+   *  - 仅 level >= 10 才清：**离屏画布 + 粒子**。有一次性重建开销或丢失正在播的特效，
+   *    但背景离屏烘焙是全屏尺寸、sprite 缓存最多 60 张，是内存大头，该放手时就放手。
+   *
+   * ⚠️ 刻意**不清** _homeBgImage / _codexBgImage 这类已加载的 image 对象：
+   *    真机图片重新加载存在「静默挂起」顽疾（onload/onerror 都不触发，见 v8 修复记录），
+   *    清掉可能再也加载不回来 → 背景永久空白，比 OOM 还糟。
+   *    它们是绘制原料，不是缓存；_bgCache 才是产物，清产物、留原料。
+   *
+   * @param {number} level 微信内存告警等级 5=轻度 / 10=紧张 / 15=危险
+   * @returns {object} 各类释放计数（便于日志排查）
+   */
+  _clearMemoryCaches(level) {
+    const freed = {};
+    try {
+      // ① 纯计算型缓存 —— 任何等级都安全
+      if (this._gradCache && typeof this._gradCache.clear === 'function') {
+        freed.grad = this._gradCache.size;
+        this._gradCache.clear();
+      }
+      freed.mt = clearMeasureTextCache();
+      if (this._codexBbCache) {
+        freed.codexBb = Object.keys(this._codexBbCache).length;
+        this._codexBbCache = {};
+      }
+      this._layoutSig = null; // 去掉陈旧签名引用，下一帧自然重算
+
+      // ② 严重告警才动「离屏画布 + 粒子」
+      if (level >= 10) {
+        if (this._bgCache) {
+          try {
+            if (typeof this._bgCache.width === 'number') { this._bgCache.width = 0; this._bgCache.height = 0; }
+          } catch (e) {}
+          this._bgCache = null;
+          this._bgCacheKey = null;
+          freed.bg = 1;
+        }
+        // 粒子/光环/浮字：纯瞬时视觉对象，清空只是丢掉正在播的特效，
+        // 远比进程被系统 kill（玩家看到"闪退"）划算。
+        freed.fx = (this.particles ? this.particles.length : 0)
+          + (this.rings ? this.rings.length : 0)
+          + (this.floatTexts ? this.floatTexts.length : 0);
+        if (this.particles) this.particles.length = 0;
+        if (this.rings) this.rings.length = 0;
+        if (this.floatTexts) this.floatTexts.length = 0;
+      }
+    } catch (e) {}
+    return freed;
+  }
+
   _getBgCache() {
     const key = this.width + 'x' + this.height;
     if (this._bgCache && this._bgCacheKey === key) return this._bgCache;
@@ -601,19 +726,26 @@ class Renderer {
         bg.height = this.height;
         const bctx = bg.getContext('2d');
         if (!bctx) { this._bgCache = null; return null; }
-        const grad = bctx.createLinearGradient(0, 0, 0, this.height);
-        grad.addColorStop(0, '#2a1b4e');
-        grad.addColorStop(1, '#1a0f33');
-        bctx.fillStyle = grad;
-        bctx.fillRect(0, 0, this.width, this.height);
-        bctx.fillStyle = '#ffffff';
-        for (const st of this.stars) {
-          bctx.globalAlpha = st.a;
-          bctx.beginPath();
-          bctx.arc(st.rx * this.width, st.ry * this.height, st.s, 0, Math.PI * 2);
-          bctx.fill();
+        const img = this._homeBgImage;
+        if (img && img._ok && img.width && img.height) {
+          // 主路径：AI 宇宙星海场景图 cover-fit 铺底 + 上下暗角（保 UI 可读）
+          this._drawHomeScene(bctx, img);
+        } else {
+          // 回退：渐变 + 星点（无图 / 未加载 / 老设备）
+          const grad = bctx.createLinearGradient(0, 0, 0, this.height);
+          grad.addColorStop(0, '#2a1b4e');
+          grad.addColorStop(1, '#1a0f33');
+          bctx.fillStyle = grad;
+          bctx.fillRect(0, 0, this.width, this.height);
+          bctx.fillStyle = '#ffffff';
+          for (const st of this.stars) {
+            bctx.globalAlpha = st.a;
+            bctx.beginPath();
+            bctx.arc(st.rx * this.width, st.ry * this.height, st.s, 0, Math.PI * 2);
+            bctx.fill();
+          }
+          bctx.globalAlpha = 1;
         }
-        bctx.globalAlpha = 1;
         this._bgCache = bg;
         this._bgCacheKey = key;
         return bg;
@@ -625,7 +757,178 @@ class Renderer {
     return this._bgCache;
   }
 
+  /**
+   * 懒加载主页 AI 场景背景：仅在具备图片 API 的环境（DevTools/真机）尝试一次；
+   * 无头测试无 Image 则跳过，背景走渐变 + 星点回退。加载完成后作废 _bgCache，
+   * 下次 _getBgCache 重烘焙时把场景图封面铺底。
+   */
+  _ensureHomeBgImage() {
+    if (this._homeBgTried) return;
+    this._homeBgTried = true;
+    const b64 = _HOME_B64;
+    const pkg = _prepSrc(null, 'home_cosmic.jpg', 'home'); // 真机源（包内路径）
+    // 诊断：打印 base64 是否接上、长度多少。若此处 b64=null 且下方 FAIL src=包内路径 → 说明 homebg.js 内联 base64 未接上（platform 判定问题）；
+    // 若 b64=len=2xxxx 但 FAIL src=data:… → 说明 data URI 在模拟器仍加载失败（需进一步降体积或换 PNG）。
+    console.log('[homebg] start b64=' + (b64 ? ('len=' + b64.length) : 'null') + ' pkg=' + pkg);
+    // DevTools 包内路径必 404（见 imgb64.js 注释），故模拟器**优先 base64**（已压到 ~16KB 解码，远低于 data-URI 上限，
+    // 且避免无谓的 404 控制台噪声）；真机 _HOME_B64 为 null → 直接用包内路径。
+    // 次级互换兜底：任一源失败仍有机会出图。
+    // ⚠️ 勿写成「if (!_HOME_B64) return;」——真机 homebg.js 经 shim 返回 null，早返回会丢包内图（同 codex 修法）。
+    const primary = b64 || pkg;
+    const secondary = b64 ? pkg : null;
+    const attempt = (s, done) => {
+      _loadOne(s, (err, im) => {
+        const tag = (typeof s === 'string' && s.slice(0, 5) === 'data:') ? 'data:…' : s;
+        if (!err && im) {
+          this._homeBgImage = downscaleToCap(im, capForLevel(this.perfLevel));  // 封顶（LOW 540p / 其余 720p），限制解码内存
+          console.log('[homebg] ok src=' + tag + ' ' + (im.width || '?') + 'x' + (im.height || '?'));
+          done(true);
+        } else {
+          console.log('[homebg] FAIL src=' + tag + ' err=' + (err && err.message));
+          done(false);
+        }
+      });
+    };
+    attempt(primary, (ok) => { if (!ok && secondary) attempt(secondary, () => {}); });
+  }
+
+  // 图鉴独立背景：懒加载，仅在 view==='codex' 时尝试一次（与主页背景互不干扰）。
+  // 真机：codexbg.js 经 shim 返回 null → _prepSrc 真机分支返回包内 images/codex/codex_atlas.jpg（省 ~72KB 常驻内存）。
+  // 模拟器：codexbg.js 返回 base64 data URI → 走 data URI 规避 404。
+  // ⚠️ 勿写成「if (!_CODEX_B64) return;」——那样真机（null）会直接跳过、背景永远走渐变回退、丢包内图。
+  _ensureCodexBgImage() {
+    if (this._codexBgTried) return;
+    this._codexBgTried = true;
+    const b64 = _CODEX_B64;
+    const pkg = _prepSrc(null, 'codex_atlas.jpg', 'codex'); // 真机源（包内路径）
+    console.log('[codexbg] start b64=' + (b64 ? ('len=' + b64.length) : 'null') + ' pkg=' + pkg);
+    // DevTools 包内路径必 404（见 imgb64.js 注释），故模拟器**优先 base64**（~6KB 解码，远低于 data-URI 上限，
+    // 且避免无谓的 404 控制台噪声）；真机 _CODEX_B64 为 null → 直接用包内路径。
+    // 次级互换兜底：任一源失败仍有机会出图。
+    // ⚠️ 勿写成「if (!_CODEX_B64) return;」——真机（null）会直接跳过、背景永远走渐变回退、丢包内图。
+    const primary = b64 || pkg;
+    const secondary = b64 ? pkg : null;
+    const attempt = (s, done) => {
+      _loadOne(s, (err, im) => {
+        const tag = (typeof s === 'string' && s.slice(0, 5) === 'data:') ? 'data:…' : s;
+        if (!err && im) {
+          this._codexBgImage = downscaleToCap(im, capForLevel(this.perfLevel));  // 封顶（LOW 540p / 其余 720p），限制解码内存
+          // 日志打降采样后的实际尺寸（而非原图 im 尺寸）：r===im = 离屏不可用未降采样 → 真机可直接判断封顶是否生效
+          const r = this._codexBgImage;
+          console.log('[codexbg] ok src=' + tag + ' cap=' + capForLevel(this.perfLevel)
+            + ' -> ' + ((r && r.width) ? (r.width + 'x' + r.height) : '?x?')
+            + (r === im ? ' [offscreen不可用→原图未降采样]' : ''));
+          done(true);
+        } else {
+          console.log('[codexbg] FAIL src=' + tag + ' err=' + (err && err.message));
+          done(false);
+        }
+      });
+    };
+    attempt(primary, (ok) => { if (!ok && secondary) attempt(secondary, () => {}); });
+  }
+
+  // 把 AI 场景图以 cover-fit 铺满离屏，再叠上下暗角（顶/底压暗放 HUD 与行动栏，中心亮核作舞台）
+  _drawHomeScene(ctx, img) {
+    const cw = this.width, ch = this.height;
+    const iw = img.width, ih = img.height;
+    const scale = Math.max(cw / iw, ch / ih);
+    const dw = iw * scale, dh = ih * scale;
+    const dx = (cw - dw) / 2, dy = (ch - dh) / 2;
+    try { ctx.drawImage(img, dx, dy, dw, dh); } catch (e) { try { ctx.drawImage(img, 0, 0, cw, ch); } catch (e2) {} }
+    // 顶部压暗（金币栏 / 胶囊）：渐变坐标只随布局尺寸变化 → 走 _grad LRU 缓存（主 ctx），
+    // 消除主视图每帧 createLinearGradient 分配（卡顿主因之一）。key 含尺寸签名，布局变化即重烘焙。
+    const g = this._gradFor(ctx, 'homeTop@' + this.width + 'x' + this.height, () => {
+      const gg = ctx.createLinearGradient(0, 0, 0, ch * 0.34);
+      gg.addColorStop(0, 'rgba(5,2,14,0.94)');
+      gg.addColorStop(1, 'rgba(5,2,14,0)');
+      return gg;
+    });
+    ctx.fillStyle = g; ctx.fillRect(0, 0, cw, ch * 0.34);
+    // 底部压暗（行动栏 / 圆盘底座）
+    const g2 = this._gradFor(ctx, 'homeBot@' + this.width + 'x' + this.height, () => {
+      const gg = ctx.createLinearGradient(0, ch * 0.58, 0, ch);
+      gg.addColorStop(0, 'rgba(5,2,14,0)');
+      gg.addColorStop(1, 'rgba(5,2,14,0.96)');
+      return gg;
+    });
+    ctx.fillStyle = g2; ctx.fillRect(0, ch * 0.58, cw, ch * 0.42);
+  }
+
+  // 图鉴专用场景：更暗、更静的陈列星图，作为 25 只陀螺密集网格的衬底。
+  // 在封面铺图后叠「整屏暗化 + 上/下渐变压暗」，让网格单元（含其自身底）稳定可读，
+  // 同时保留星图纹理的微弱存在感（不丢失「图鉴」调性）。
+  _drawCodexScene(ctx, img) {
+    const cw = this.width, ch = this.height;
+    const iw = img.width, ih = img.height;
+    const scale = Math.max(cw / iw, ch / ih);
+    const dw = iw * scale, dh = ih * scale;
+    const dx = (cw - dw) / 2, dy = (ch - dh) / 2;
+    try { ctx.drawImage(img, dx, dy, dw, dh); } catch (e) { try { ctx.drawImage(img, 0, 0, cw, ch); } catch (e2) {} }
+    // 整屏暗化（轻度）：仅把星图压成弱背景纹理，避免"盖住"网格与顶部信息（原 0.5 过重建遮挡感）
+    ctx.fillStyle = 'rgba(46,20,74,0.26)';
+    ctx.fillRect(0, 0, cw, ch);
+    // 顶部压暗（图鉴 x/y 头部）：轻压，仅保证标题可读，不再压到网格。走 _grad LRU 缓存（同主页）。
+    const g = this._gradFor(ctx, 'codexTop@' + this.width + 'x' + this.height, () => {
+      const gg = ctx.createLinearGradient(0, 0, 0, ch * 0.18);
+      gg.addColorStop(0, 'rgba(5,2,14,0.70)');
+      gg.addColorStop(1, 'rgba(5,2,14,0)');
+      return gg;
+    });
+    ctx.fillStyle = g; ctx.fillRect(0, 0, cw, ch * 0.16);
+    // 底部压暗（末行陀螺 + 安全区）：轻压
+    const g2 = this._gradFor(ctx, 'codexBot@' + this.width + 'x' + this.height, () => {
+      const gg = ctx.createLinearGradient(0, ch * 0.70, 0, ch);
+      gg.addColorStop(0, 'rgba(5,2,14,0)');
+      gg.addColorStop(1, 'rgba(5,2,14,0.82)');
+      return gg;
+    });
+    ctx.fillStyle = g2; ctx.fillRect(0, ch * 0.70, cw, ch * 0.30);
+  }
+
+  // 非当前视图背景图释放（U10-B）：主页背景仅用于非 codex 视图，图鉴背景仅用于 codex 视图。
+  // 切走即释放原料，切回时由 _ensure*BgImage 在 jsbridge 已就绪的运行时重新加载
+  // （不是启动期，无静默挂起风险；即便重载失败也有 _bgCache/渐变回退托底，不会永久空白）。
+  // 释放同时重置 *_BgTried 标记，使切回时能重新触发加载。
+  // 释放「背景产物画布」的显存/后备存储。
+  // downscaleToCap 返回的是 wx.createOffscreenCanvas 产物（真机离屏可用时），它在微信里是
+  // **native 内存**，光置 null 交 GC 不保证及时回收；显式 width=0/height=0 才会立刻释放后备存储
+  // （与 beyblade.js 的 sprite LRU 淘汰、_clearMemoryCaches 清 _bgCache 同一原语）。
+  // 只对离屏画布做（有 getContext）；原始 wx.Image 没有后备存储可归零，丢引用即可。
+  _releaseBgBitmap(im) {
+    if (!im) return;
+    if (typeof im.getContext === 'function' && typeof im.width === 'number') {
+      try { im.width = 0; im.height = 0; } catch (e) {}
+    }
+  }
+
+  _releaseInactiveBg() {
+    const isCodex = !!(this.game && this.game.view === 'codex');
+    if (isCodex) {
+      if (this._homeBgImage) { this._releaseBgBitmap(this._homeBgImage); this._homeBgImage = null; this._homeBgTried = false; }
+    } else {
+      if (this._codexBgImage) { this._releaseBgBitmap(this._codexBgImage); this._codexBgImage = null; this._codexBgTried = false; }
+    }
+  }
+
   drawBackground() {
+    // 视图选图：图鉴用独立「陈列星图」背景；主页/合成/其它沿用宇宙星海背景。
+    const isCodex = !!(this.game && this.game.view === 'codex');
+    this._releaseInactiveBg(); // 先释放非当前视图背景，省常驻解码内存（U10-B）
+    let img = null;
+    if (isCodex) {
+      this._ensureCodexBgImage();
+      img = this._codexBgImage;
+    } else {
+      this._ensureHomeBgImage();
+      img = this._homeBgImage;
+    }
+    // 主路径：AI 场景图直接铺主画布（对齐对战页机制，真机最稳，不依赖离屏烘焙）
+    if (img && img._ok && img.width > 0 && img.height > 0) {
+      if (isCodex) this._drawCodexScene(this.ctx, img);
+      else this._drawHomeScene(this.ctx, img);
+      return;
+    }
     const bg = this._getBgCache();
     if (bg) {
       try {
@@ -792,7 +1095,9 @@ class Renderer {
 
     // ----- 右 · 图标组：按 _reflow 好的 rightXStart 从左往右排，保证整体对齐右边界 -----
     let gx = L.rightXStart;
-    const canSignNow = this.game.canSign && this.game.canSign();
+    // 可签高亮由 autoSignAvailable 驱动（纯判定，今日可签且当前无回归弹窗时为 true）；
+    // 不用 canSign() 直驱以避免在渲染期额外推进存档状态，且与「启动期不强制弹窗」语义一致。
+    const canSignNow = this.game.autoSignAvailable && this.game.autoSignAvailable();
     // 签到宽度（可领取时稍微宽一点点带金边，否则按 signBtnW=52 保持不变）
     const signW = canSignNow ? Math.max(L.signBtnW, 52) : L.signBtnW;
     const signRect = { x: gx, y: y + (L.topBarH - icoH) / 2, w: signW, h: icoH, action: 'signin' };
@@ -812,6 +1117,22 @@ class Renderer {
       ctx.globalAlpha = 1;
     }
     this.buttons.push(signRect);
+    // 可签红点（非强制弹窗，仅高亮提示）：autoSignAvailable 为 true 时于签到按钮右上角画小红点，
+    // 引导玩家主动点开打卡，不自动弹面板。红点 + 白边保证深色背景上清晰可辨。
+    if (canSignNow) {
+      const dotR = 6;
+      const dotX = signRect.x + signRect.w - dotR * 0.5;
+      const dotY = signRect.y + dotR * 0.5;
+      ctx.save();
+      ctx.beginPath();
+      ctx.fillStyle = '#ff3b30';
+      ctx.arc(dotX, dotY, dotR, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.lineWidth = 1.5;
+      ctx.strokeStyle = 'rgba(255,255,255,0.92)';
+      ctx.stroke();
+      ctx.restore();
+    }
     this.drawIconButton(muteRect, this.audio && this.audio.muted ? 'mute' : 'unmute');
     this.buttons.push(muteRect);
 
@@ -1098,6 +1419,181 @@ class Renderer {
     this.tabRects = [tabMain, tabCodex];
   }
 
+  /** V2 主场景：视图切换条（合成/图鉴）+ 任务入口，替代 drawTitleAndTabs 的「游戏名+副标题」大标题区 */
+  drawViewTabs() {
+    const ctx = this.ctx;
+    const L = this.layout;
+    const W = L.W;
+    const tabY = L.tabY;
+    const tabH = 28;
+    const tabW = L.tabW;
+    const tabGap = 16;
+    const tabsTotal = tabW * 2 + tabGap;
+    const tabStartX = (W - tabsTotal) / 2;
+    const tabMain   = { x: tabStartX,                 y: tabY, w: tabW, h: tabH, view: 'main',  name: '合成', icon: 'merge' };
+    const tabCodex  = { x: tabStartX + tabW + tabGap, y: tabY, w: tabW, h: tabH, view: 'codex', name: '图鉴', icon: 'codex' };
+    this.drawTab(tabMain, this.game.view === 'main');
+    this.drawTab(tabCodex, this.game.view === 'codex');
+    this.tabRects = [tabMain, tabCodex];
+
+    // 任务入口：原在 drawTitleAndTabs 内绘制，V2 下移到切换条右侧，保证入口不丢失
+    const tBtnW = 62, tBtnH = 28;
+    const tBtnX = W - 16 - tBtnW;
+    const dailyBtn = { x: tBtnX, y: tabY, w: tBtnW, h: tBtnH, action: 'daily' };
+    ctx.save();
+    const dg = this._grad('v2daily|' + Math.round(tBtnX) + '|' + Math.round(tabY), () => {
+      const g0 = ctx.createLinearGradient(tBtnX, tabY, tBtnX, tabY + tBtnH);
+      g0.addColorStop(0, '#ffd54f');
+      g0.addColorStop(1, '#ffb300');
+      return g0;
+    });
+    ctx.fillStyle = dg;
+    this.roundRect(tBtnX, tabY, tBtnW, tBtnH, tBtnH / 2); ctx.fill();
+    ctx.strokeStyle = 'rgba(255,255,255,0.55)';
+    ctx.lineWidth = 1;
+    this.roundRect(tBtnX + 0.5, tabY + 0.5, tBtnW - 1, tBtnH - 1, tBtnH / 2 - 0.5); ctx.stroke();
+    this._drawPngIcon('task', tBtnX + 13, tabY + tBtnH / 2, 15);
+    ctx.fillStyle = '#4a2a0a';
+    ctx.font = 'bold 13px ' + APPLE_FONT;
+    ctx.textAlign = 'left';
+    ctx.textBaseline = 'middle';
+    ctx.fillText('任务', tBtnX + 25, tabY + tBtnH / 2 + 0.5);
+    ctx.restore();
+    this.buttons.push(dailyBtn);
+  }
+
+  /** V2 主场景：合成台升级为「锻造工坊」——熔炉光晕 + 能量汇聚射线 + 暗金属圆面 +
+   *  金属锻造环 + 铆钉。
+   *  语义对齐：这里是「合成升级」的锻造台，**不是对抗的竞技场**，故用暖色炉火/金属语言
+   *  （琥珀·橙·暗金），而非冷色竞技符文。
+   *  装饰全部绘制在 drawPlatform 之前（作为背景），不遮挡三槽/陀螺/提示文案，
+   *  命中区完全沿用 drawPlatform 注册的 platformRects，交互零改动。 */
+  drawForgeV2(dt) {
+    const ctx = this.ctx;
+    const L = this.layout;
+    const cx = L.arenaCx, cy = L.arenaCy, R = L.arenaR;
+    if (!(R > 0)) { this.drawPlatform(); return; }
+    const t = Date.now() / 1000;
+
+    // ---- 00 中央暗衬底（修主页背景中心过亮、把陀螺/圆盘框「吃掉」的问题）----
+    // 在宇宙能量底座之前的最底层铺一圈径向暗场：中心最暗、向外渐隐，
+    // 既不破坏星海背景的四周氛围，又给主舞台（圆盘+陀螺）一个稳定的暗底让其浮出。
+    ctx.save();
+    const scrim = this._grad('v2homescrim|' + Math.round(cx) + '|' + Math.round(cy) + '|' + Math.round(R), () => {
+      const g = ctx.createRadialGradient(cx, cy, R * 0.2, cx, cy, R * 1.5);
+      g.addColorStop(0, 'rgba(8,5,20,0.55)');
+      g.addColorStop(0.55, 'rgba(8,5,20,0.34)');
+      g.addColorStop(1, 'rgba(8,5,20,0)');
+      return g;
+    });
+    ctx.fillStyle = scrim;
+    ctx.beginPath();
+    ctx.arc(cx, cy, R * 1.5, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.restore();
+
+    // ---- 0 宇宙能量底座（冷调辉光，呼应星海背景，使圆盘像悬浮在能量平台上）----
+    // 纯装饰、绘制在熔炉光晕之前（最底层），不遮挡任何槽位/陀螺，命中区零改动。
+    ctx.save();
+    const base = this._grad('v2cosmobase|' + Math.round(cx) + '|' + Math.round(cy) + '|' + Math.round(R), () => {
+      const g = ctx.createRadialGradient(cx, cy + R * 0.18, R * 0.1, cx, cy + R * 0.18, R * 1.45);
+      g.addColorStop(0, 'rgba(80,140,255,0.16)');
+      g.addColorStop(0.55, 'rgba(120,90,230,0.10)');
+      g.addColorStop(1, 'rgba(18,12,40,0)');
+      return g;
+    });
+    ctx.fillStyle = base;
+    ctx.beginPath();
+    ctx.arc(cx, cy + R * 0.18, R * 1.45, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.restore();
+
+    // ---- ① 熔炉光晕（炉火由中心向外透出，暖橙）----
+    ctx.save();
+    const halo = this._grad('v2forgehalo|' + Math.round(cx) + '|' + Math.round(cy) + '|' + Math.round(R), () => {
+      const g = ctx.createRadialGradient(cx, cy, R * 0.15, cx, cy, R * 1.2);
+      g.addColorStop(0, 'rgba(255,150,60,0.20)');
+      g.addColorStop(0.5, 'rgba(190,80,25,0.11)');
+      g.addColorStop(1, 'rgba(30,16,8,0)');
+      return g;
+    });
+    ctx.fillStyle = halo;
+    ctx.beginPath();
+    ctx.arc(cx, cy, R * 1.2, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.restore();
+
+    // ---- ② 能量汇聚射线（由外向内注入中心，缓慢脉动）----
+    ctx.save();
+    const pulse = 0.5 + 0.5 * Math.sin(t * 1.1);
+    ctx.globalAlpha = 0.16 + 0.14 * pulse;
+    ctx.strokeStyle = '#ffca28';
+    ctx.lineWidth = 2;
+    ctx.lineCap = 'round';
+    for (let i = 0; i < 8; i++) {
+      const a = (i / 8) * Math.PI * 2 + t * 0.05;
+      ctx.beginPath();
+      ctx.moveTo(cx + Math.cos(a) * R * 0.97, cy + Math.sin(a) * R * 0.97);
+      ctx.lineTo(cx + Math.cos(a) * R * 0.72, cy + Math.sin(a) * R * 0.72);
+      ctx.stroke();
+    }
+    ctx.restore();
+
+    // ---- ③ 主圆面（暗金属，偏心受光）----
+    ctx.save();
+    const disc = this._grad('v2forgedisc|' + Math.round(cx) + '|' + Math.round(cy) + '|' + Math.round(R), () => {
+      const g = ctx.createRadialGradient(cx, cy - R * 0.28, R * 0.08, cx, cy, R);
+      g.addColorStop(0, 'rgba(96,64,34,0.55)');
+      g.addColorStop(0.7, 'rgba(48,30,17,0.5)');
+      g.addColorStop(1, 'rgba(24,15,9,0.62)');
+      return g;
+    });
+    ctx.fillStyle = disc;
+    ctx.beginPath();
+    ctx.arc(cx, cy, R, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.restore();
+
+    // ---- ④ 金属锻造环（亮-暗-亮线性渐变模拟金属反光）+ 内圈细环 ----
+    ctx.save();
+    const ringGrad = this._grad('v2forgering|' + Math.round(cx) + '|' + Math.round(cy) + '|' + Math.round(R), () => {
+      const g = ctx.createLinearGradient(cx - R, cy - R, cx + R, cy + R);
+      g.addColorStop(0, 'rgba(255,214,140,0.85)');
+      g.addColorStop(0.35, 'rgba(150,95,40,0.7)');
+      g.addColorStop(0.6, 'rgba(235,180,90,0.85)');
+      g.addColorStop(1, 'rgba(110,68,28,0.7)');
+      return g;
+    });
+    ctx.strokeStyle = ringGrad;
+    ctx.lineWidth = 3.5;
+    ctx.shadowColor = 'rgba(255,160,60,0.55)';
+    ctx.shadowBlur = 10 * this.shadowScale;
+    ctx.beginPath();
+    ctx.arc(cx, cy, R * 0.99, 0, Math.PI * 2);
+    ctx.stroke();
+    ctx.shadowBlur = 0;
+    ctx.strokeStyle = 'rgba(255,200,110,0.28)';
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.arc(cx, cy, R * 0.9, 0, Math.PI * 2);
+    ctx.stroke();
+    ctx.restore();
+
+    // ---- ⑤ 铆钉（沿环分布，机械/锻造感）----
+    ctx.save();
+    ctx.fillStyle = 'rgba(255,205,120,0.6)';
+    for (let i = 0; i < 12; i++) {
+      const a = (i / 12) * Math.PI * 2 + t * 0.06;
+      ctx.beginPath();
+      ctx.arc(cx + Math.cos(a) * R * 0.945, cy + Math.sin(a) * R * 0.945, 2.2, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    ctx.restore();
+
+    // ---- ⑥ 三槽 / 陀螺 / 提示文案（沿用原绘制，命中区不变）----
+    this.drawPlatform();
+  }
+
   // =====================================================
   // 区域 3 · Arena（合成台）— 三槽等边三角排布，严格不越圆盘
   // =====================================================
@@ -1172,7 +1668,7 @@ class Renderer {
     ctx.restore();
 
     const pair = this._mergeablePair();
-    const mergeHi = new Set(pair || []);
+    const mergeHi = pair || null;
 
     const slotR = L.slotR;
     const circum = L.slotCircum;
@@ -1184,7 +1680,7 @@ class Renderer {
       const sy = cy + Math.sin(ang) * circum;
 
       // 可合成对：金色脉冲环 + 顶部"可合成↑"提示
-      if (mergeHi.has(i)) {
+      if (mergeHi && mergeHi.indexOf(i) >= 0) {
         const pulse = 0.5 + 0.5 * Math.sin(Date.now() / 150);
         ctx.strokeStyle = '#ffd54f';
         ctx.globalAlpha = 0.4 + 0.4 * pulse;
@@ -1212,7 +1708,8 @@ class Renderer {
       const bb = this.game.platformSlots[i];
       if (bb) {
         // 合成台：所有等级陀螺尺寸一致（uniformSize），避免高等级陀螺超出槽位
-        drawBeyblade(ctx, sx, sy, bb, Math.max(0.5, slotR / 50), { maxSize: slotR * 1.8, uniformSize: true });
+        // maxSize = slotR*1.88 → 陀螺直径占虚线槽位直径的 94%（原 1.8=90%，视觉偏空）
+        drawBeyblade(ctx, sx, sy, bb, Math.max(0.5, slotR / 50), { maxSize: slotR * 1.88, uniformSize: true });
         // 属性角标已去除（陀螺本体为纯净 PNG + 中央等级数字）
       } else if (!this.game.tutorialDone && this.game.inventory.length > 0) {
         // 新手期空槽提示：轻量"拖入"引导（仅教学未完成且有库存时）
@@ -1301,11 +1798,11 @@ class Renderer {
     this.roundRect(battleRect.x - 2, battleRect.y - 2, battleRect.w + 4, battleRect.h + 4, Math.min(20, battleRect.h / 2 + 1));
     ctx.stroke();
     ctx.restore();
-    // 保底进度可视化：抽卡按钮内中下部金色小字，显示最近的保底剩余（与设计稿"保底4"一致）
+    // 临近保底提示：仅剩 1~2 抽时才在抽卡按钮内中下部显示金色小字，平时不显示（减少信息噪音）
     if (this.game.energy >= 8) {
       const pe = this.game.pityEpic || 0, pl = this.game.pityLegend || 0;
       const remain = Math.max(1, Math.min(10 - pe, 30 - pl));
-      if (remain <= 8) {
+      if (remain <= 2) {
         ctx.save();
         ctx.fillStyle = '#ffd54f';
         ctx.font = 'bold 10px ' + APPLE_FONT;
@@ -1315,6 +1812,146 @@ class Renderer {
         ctx.restore();
       }
     }
+    this._drawObGlow(); // 首程直达轻引导（呼吸光圈，不打断）
+  }
+
+  /** V2 主场景：四个一致性主行动按钮 —— 对战 / 合成 / 抽卡 / 增益，等宽等分、同形状同字号 */
+  drawHomeActions() {
+    const ctx = this.ctx;
+    const L = this.layout;
+    const W = L.W;
+    const pad = 16, gap = 8;
+    // 四个主行动按钮等宽等分：对战(直接开战) / 合成 / 抽卡 / 增益(开增益面板)。
+    // 视觉语言统一（异形切角 + 同字号 + 同高度），仅配色区分，不再有主次大小之分。
+    const n = 4;
+    const total = W - pad * 2 - gap * (n - 1);
+    const bw = Math.floor(total / n);
+    const y = L.actionY, h = L.actionBtnH;
+    const make = (i, action) => ({ x: pad + i * (bw + gap), y, w: bw, h, action });
+    const battleRect = make(0, 'battle_quick');
+    const mergeRect  = make(1, 'merge');
+    const drawRect   = make(2, 'draw');
+    const gainRect   = make(3, 'buff');
+    const rects = [battleRect, mergeRect, drawRect, gainRect];
+    // 存给新手引导高亮光圈定位用
+    this.battleBtnRect = battleRect;
+    this.mergeBtnRect = mergeRect;
+    this.drawBtnRect = drawRect;
+
+    // 异形切角路径（游戏按钮语言：区别于小程序通用圆角矩形）
+    const cutOf = (r, k) => Math.min(k, r.h * 0.28);
+    const angledPath = (r, k) => {
+      const c = cutOf(r, k);
+      ctx.beginPath();
+      ctx.moveTo(r.x + c, r.y);
+      ctx.lineTo(r.x + r.w - c, r.y);
+      ctx.lineTo(r.x + r.w, r.y + c);
+      ctx.lineTo(r.x + r.w, r.y + r.h - c);
+      ctx.lineTo(r.x + r.w - c, r.y + r.h);
+      ctx.lineTo(r.x + c, r.y + r.h);
+      ctx.lineTo(r.x, r.y + r.h - c);
+      ctx.lineTo(r.x, r.y + c);
+      ctx.closePath();
+    };
+    const paintAngled = (r, k, c0, c1, c2, edge, glowColor, glowBase, pulseAmp) => {
+      const pressed = this.pressedBtn && this.pressedBtn.rect && this.pressedBtn.rect.action === r.action;
+      const sc = pressed ? 0.94 : 1;
+      ctx.save();
+      if (sc !== 1) {
+        const mx = r.x + r.w / 2, my = r.y + r.h / 2;
+        ctx.translate(mx, my); ctx.scale(sc, sc); ctx.translate(-mx, -my);
+      }
+      // 外发光（主钮呼吸，次钮恒定弱光）
+      const pulse = 0.5 + 0.5 * Math.sin(Date.now() / 600);
+      ctx.shadowColor = glowColor;
+      ctx.shadowBlur = (glowBase + pulseAmp * pulse) * this.shadowScale;
+      angledPath(r, k);
+      const g = this._grad('v2btn|' + r.action + '|' + Math.round(r.x) + '|' + Math.round(r.y), () => {
+        const g0 = ctx.createLinearGradient(r.x, r.y, r.x, r.y + r.h);
+        g0.addColorStop(0, c0);
+        g0.addColorStop(0.45, c1);
+        g0.addColorStop(1, c2);
+        return g0;
+      });
+      ctx.fillStyle = g;
+      ctx.fill();
+      ctx.shadowBlur = 0;
+      // 上半高光带（金属质感）
+      ctx.save();
+      ctx.clip();
+      ctx.fillStyle = 'rgba(255,255,255,0.22)';
+      ctx.fillRect(r.x, r.y, r.w, r.h * 0.45);
+      ctx.restore();
+      // 亮边
+      ctx.strokeStyle = edge;
+      ctx.lineWidth = 1.6;
+      ctx.stroke();
+      // 按下暗化
+      if (pressed) {
+        ctx.fillStyle = 'rgba(0,0,0,0.2)';
+        ctx.fill();
+      }
+      ctx.restore();
+    };
+
+    // 四个按钮统一绘制（同形状、同切角；仅配色/呼吸光区分）
+    const THEME = {
+      battle_quick: { c0:'#ff8a65', c1:'#e53935', c2:'#8e1414', edge:'rgba(255,220,180,0.85)', glow:'rgba(255,80,60,0.6)', glowBase:14, pulseAmp:8 },
+      merge:        { c0:'#ffcc80', c1:'#ff8f00', c2:'#8a4b00', edge:'rgba(255,235,200,0.7)', glow:'rgba(255,179,0,0.35)', glowBase:6, pulseAmp:0 },
+      draw:         { c0:'#d1b3ff', c1:'#7e57c2', c2:'#3d2a63', edge:'rgba(235,220,255,0.7)', glow:'rgba(179,136,255,0.35)', glowBase:6, pulseAmp:0 },
+      buff:         { c0:'#b9f6ca', c1:'#43a047', c2:'#1b5e20', edge:'rgba(220,255,225,0.7)', glow:'rgba(76,175,80,0.35)', glowBase:6, pulseAmp:0 },
+    };
+    const k = 10; // 统一切角
+    for (const r of rects) {
+      const t = THEME[r.action];
+      paintAngled(r, k, t.c0, t.c1, t.c2, t.edge, t.glow, t.glowBase, t.pulseAmp);
+    }
+
+    // 文字与图标（统一：四个按钮全部图标上方居中、文字下方居中）
+    const ICONS = { battle_quick: 'play', merge: 'merge', draw: 'chest', buff: 'sparkle' };
+    // 四图标源图内容占比不同（play 86%高 / merge 71%宽且扁 / chest ~100% / sparkle 89%高，已实测），
+    // 按下「内容长边填满 18px 框」各自等比放大，使四个图标视觉大小一致。倍率 = 18 / (18 × 内容长边占比) = 1 / 内容长边占比。
+    // 宝箱(chest)占比≈100% 保持 1.0（不缩小），其余放大补齐 —— 与之前「整体缩小到 78%」不同，本方案保留宝箱原始大小且整排不缩水。
+    const ICON_SCALE = { battle_quick: 1 / 0.86, merge: 1 / 0.71, draw: 1, buff: 1 / 0.89 };
+    const TEXTS = { battle_quick: '对战', merge: '合成', draw: '抽卡', buff: '增益' };
+    const label = (r) => {
+      ctx.save();
+      const ic = ICONS[r.action];
+      ctx.fillStyle = '#ffffff';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.shadowColor = 'rgba(0,0,0,0.5)';
+      ctx.shadowBlur = 3;
+      if (ic) {
+        this._drawPngIcon(ic, r.x + r.w / 2, r.y + r.h * 0.36, 18 * (ICON_SCALE[r.action] || 1));
+        ctx.font = 'bold 16px ' + APPLE_FONT;
+        ctx.fillText(TEXTS[r.action], r.x + r.w / 2, r.y + r.h * 0.72);
+      } else {
+        ctx.font = 'bold 17px ' + APPLE_FONT;
+        ctx.fillText(TEXTS[r.action], r.x + r.w / 2, r.y + r.h / 2);
+      }
+      ctx.shadowBlur = 0;
+      ctx.restore();
+    };
+    for (const r of rects) label(r);
+
+    this.buttons.push(battleRect, mergeRect, drawRect, gainRect);
+
+    // 临近保底提示：仅剩 1~2 抽时才在抽卡按钮内中下部显示金色小字，平时不显示（减少信息噪音）
+    if (this.game.energy >= 8) {
+      const pe = this.game.pityEpic || 0, pl = this.game.pityLegend || 0;
+      const remain = Math.max(1, Math.min(10 - pe, 30 - pl));
+      if (remain <= 2) {
+        ctx.save();
+        ctx.fillStyle = '#ffd54f';
+        ctx.font = 'bold 10px ' + APPLE_FONT;
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillText('保底 ' + remain + ' 抽', drawRect.x + drawRect.w / 2, drawRect.y + drawRect.h - 9);
+        ctx.restore();
+      }
+    }
+    this._drawObGlow(); // 首程直达轻引导（呼吸光圈，不打断）
   }
 
   // =====================================================
@@ -1337,8 +1974,8 @@ class Renderer {
     this.filterRects = [];
     // 全名优先级：filtBtnW >= 44 → 全名（11px 中文两字 24px + 边距 20 = 44）；否则两字
     const fullName = filtBtnW >= 44;
-    const SHORT = { '土·普通': '土', '木·稀有': '木', '水·史诗': '水', '火·精英': '火', '金·传说': '金' };
-    const filtNames = [fullName ? '全部' : '全', ...TIERS.map(t => (fullName ? t.name : (SHORT[t.name] || t.name.charAt(0))))];
+    // filtNames 按 fullName 取模块级 memo（CODEX_FILT_NAMES），消除每帧 TIERS.map 新建数组
+    const filtNames = CODEX_FILT_NAMES[fullName];
     for (let i = -1; i < TIERS.length; i++) {
       const name = filtNames[i + 1];
       const rect = {
@@ -1397,6 +2034,47 @@ class Renderer {
     return Math.max(1, Math.floor((L.invMaxBottom - 24 - L.invY + L.invGap) / L.invRowStep));
   }
 
+  /** 背包空状态引导（网格 / 陈列两种模式共用） */
+  drawInventoryEmptyState() {
+    const ctx = this.ctx;
+    const L = this.layout;
+    const list = this.game.getFilteredInventory();
+    const startX = L.invStartX;
+    const cell = L.invCell, gap = L.invGap, cols = L.invCols;
+    ctx.save();
+    const ex = L.invStartX;
+    const ew = startX + cols * cell + (cols - 1) * gap - ex;
+    const ey = L.invY + (L.invMaxBottom - L.invY) / 2;
+    const emptyAll = list.length === 0 && this.game.filterTier < 0;
+    const cx = ex + ew / 2;
+    const cy = ey - 14;
+    // 中央：3 个灰色虚线圆环「空槽位」（暗示这里将放置陀螺）
+    ctx.strokeStyle = 'rgba(255,255,255,0.16)';
+    ctx.lineWidth = 1.5;
+    ctx.setLineDash([5, 6]);
+    for (let i = -1; i <= 1; i++) {
+      ctx.beginPath();
+      ctx.arc(cx + i * 34, cy, 23, 0, Math.PI * 2);
+      ctx.stroke();
+    }
+    ctx.setLineDash([]);
+    // 中间槽位：金色「+」（待填充语义）
+    ctx.fillStyle = 'rgba(255,213,79,0.55)';
+    ctx.font = 'bold 22px ' + APPLE_FONT;
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText('+', cx, cy);
+    // 主文案
+    ctx.fillStyle = 'rgba(255,255,255,0.78)';
+    ctx.font = 'bold 14px ' + APPLE_FONT;
+    ctx.fillText(emptyAll ? '背包空空的，去抽卡获得陀螺吧' : '该品质还没有陀螺', cx, cy + 50);
+    // 副文案
+    ctx.fillStyle = 'rgba(255,255,255,0.42)';
+    ctx.font = '11px ' + APPLE_FONT;
+    ctx.fillText(emptyAll ? '消耗能量抽卡 · 集齐 25 款图鉴' : '试试其它品质标签', cx, cy + 68);
+    ctx.restore();
+  }
+
   // =====================================================
   // 区域 6 · 背包网格（动态 cell，保证不出 invMaxBottom；溢出提示在右下方 badge）
   // =====================================================
@@ -1419,40 +2097,7 @@ class Renderer {
     const drawn = list.slice(page * maxItems, (page + 1) * maxItems);
 
     // 空背包引导：无陀螺时给精致空状态（空槽位视觉 + 文案），避免空白区域不知所措
-    if (drawn.length === 0) {
-      ctx.save();
-      const ex = L.invStartX;
-      const ew = startX + cols * cell + (cols - 1) * gap - ex;
-      const ey = L.invY + (L.invMaxBottom - L.invY) / 2;
-      const emptyAll = list.length === 0 && this.game.filterTier < 0;
-      const cx = ex + ew / 2;
-      const cy = ey - 14;
-      // 中央：3 个灰色虚线圆环"空槽位"（暗示这里将放置陀螺）
-      ctx.strokeStyle = 'rgba(255,255,255,0.16)';
-      ctx.lineWidth = 1.5;
-      ctx.setLineDash([5, 6]);
-      for (let i = -1; i <= 1; i++) {
-        ctx.beginPath();
-        ctx.arc(cx + i * 34, cy, 23, 0, Math.PI * 2);
-        ctx.stroke();
-      }
-      ctx.setLineDash([]);
-      // 中间槽位：金色"+"（待填充语义）
-      ctx.fillStyle = 'rgba(255,213,79,0.55)';
-      ctx.font = 'bold 22px ' + APPLE_FONT;
-      ctx.textAlign = 'center';
-      ctx.textBaseline = 'middle';
-      ctx.fillText('+', cx, cy);
-      // 主文案
-      ctx.fillStyle = 'rgba(255,255,255,0.78)';
-      ctx.font = 'bold 14px ' + APPLE_FONT;
-      ctx.fillText(emptyAll ? '背包空空的，去抽卡获得陀螺吧' : '该品质还没有陀螺', cx, cy + 50);
-      // 副文案
-      ctx.fillStyle = 'rgba(255,255,255,0.42)';
-      ctx.font = '11px ' + APPLE_FONT;
-      ctx.fillText(emptyAll ? '消耗能量抽卡 · 集齐 25 款图鉴' : '试试其它品质标签', cx, cy + 68);
-      ctx.restore();
-    }
+    if (drawn.length === 0) this.drawInventoryEmptyState();
 
     for (let i = 0; i < drawn.length; i++) {
       const bb = drawn[i];
@@ -1468,7 +2113,8 @@ class Renderer {
       ctx.fill(); ctx.stroke();
       ctx.restore();
       // 背包：所有等级陀螺尺寸一致（uniformSize），避免高等级陀螺超出格子
-      drawBeyblade(ctx, x + cell / 2, y + cell / 2, bb, Math.max(0.3, cell / 100), { maxSize: cell * 0.88, uniformSize: true });
+      // maxSize = cell*0.94 → 陀螺直径占格子的 94%（原 0.88，四边留白 6% 视觉偏空）
+      drawBeyblade(ctx, x + cell / 2, y + cell / 2, bb, Math.max(0.3, cell / 100), { maxSize: cell * 0.94, uniformSize: true });
       // 属性角标已去除（陀螺本体为纯净 PNG + 中央等级数字）
       x += cell + gap;
       if ((i + 1) % cols === 0) { x = startX; y += cell + gap; }
@@ -1503,6 +2149,179 @@ class Renderer {
       this._drawChevron(rightRect, page < totalPages - 1);
       this.buttons.push(leftRect, midRect, rightRect);
     }
+  }
+
+  /** 陈列轨道开关：game.invRailV2 = false 回退网格 */
+  invRailV2On() { return this.game.invRailV2 !== false; }
+
+  /** 快速开战开关（#11 首屏可玩）：game.quickBattleV2 = false 时主按钮恢复为「先弹增益面板」 */
+  quickBattleV2On() { return this.game.quickBattleV2 !== false; }
+
+  /** 陈列轨道最大横向滚动量（列表宽度 - 视口宽度）；列表/筛选变化后供钳制用 */
+  invMaxScroll() {
+    const L = this.layout;
+    const viewportW = L.W - 32;
+    const pagerH = 20;
+    const railH = Math.max(56, (L.invMaxBottom - L.invY) - pagerH - 4);
+    const cardW = Math.max(62, Math.min(84, Math.round(railH * 0.74)));
+    const step = cardW + 8;
+    const list = this.game.getFilteredInventory();
+    const totalW = list.length * step - 8;
+    return Math.max(0, totalW - viewportW);
+  }
+
+  /** 陈列轨道可视区矩形（padX 留白 + 卡片区），供输入层判断「手指是否落在轨道上」 */
+  invRailRect() {
+    const L = this.layout;
+    const W = L.W;
+    const padX = 16;
+    const viewportW = W - padX * 2;
+    const railY = L.invY;
+    const pagerH = 20;
+    const railH = Math.max(56, (L.invMaxBottom - L.invY) - pagerH - 4);
+    return { x: padX - 2, y: railY - 2, w: viewportW + 4, h: railH + 4 };
+  }
+
+  /** 松手惯性：每帧把速度叠到 invScrollX 并衰减，撞到两端归零（_stepInvInertia 由 main.update 调用） */
+  _stepInvInertia() {
+    if (!this._invVel) return;
+    const maxScroll = this.invMaxScroll();
+    let ns = this.invScrollX + this._invVel;
+    if (ns < 0) { ns = 0; this._invVel = 0; }
+    else if (ns > maxScroll) { ns = maxScroll; this._invVel = 0; }
+    this.invScrollX = ns;
+    this._invVel *= 0.9;
+    if (Math.abs(this._invVel) < 0.4) this._invVel = 0;
+  }
+
+  /** 陈列轨道按屏滚动（dir = -1 上一屏 / +1 下一屏），供 inv_prev / inv_next 调用 */
+  scrollInventoryByScreen(dir) {
+    const L = this.layout;
+    const viewportW = L.W - 32;
+    const pagerH = 20;
+    const railH = Math.max(56, (L.invMaxBottom - L.invY) - pagerH - 4);
+    const cardW = Math.max(62, Math.min(84, Math.round(railH * 0.74)));
+    const step = cardW + 8;
+    const maxScroll = this.invMaxScroll();
+    let next = this.invScrollX + dir * Math.max(step, viewportW * 0.8);
+    if (next < 0) next = 0;
+    if (next > maxScroll) next = maxScroll;
+    this.invScrollX = next;
+  }
+
+  /** V2 陈列轨道：背包由「网格列表」改为「陀螺陈列卡」——横向卡片流（展柜质感），
+   *  每张卡带品质渐变底、稀有度光晕、陀螺大图、品质名与等级角标。
+   *  交互契约完全保留：仅把**与可视区相交**的卡片注册进 gridRects，
+   *  因此拖拽到合成台 / 长按出售 / 点击放入 三种操作照旧工作。
+   *  翻页改为滚动一屏（inv_prev / inv_next 走 scrollInventoryByScreen）。 */
+  drawInventoryRailV2() {
+    const ctx = this.ctx;
+    const L = this.layout;
+    const W = L.W;
+    const list = this.game.getFilteredInventory();
+    if (list.length === 0) { this.drawInventoryEmptyState(); return; }
+
+    const padX = 16;
+    const viewportW = W - padX * 2;
+    const railY = L.invY;
+    const pagerH = 20;
+    const railH = Math.max(56, (L.invMaxBottom - L.invY) - pagerH - 4);
+    const cardW = Math.max(62, Math.min(84, Math.round(railH * 0.74)));
+    const cardGap = 8;
+    const step = cardW + cardGap;
+
+    // 滚动范围钳制（列表变短/筛选切换后自动收敛）
+    const totalW = list.length * step - cardGap;
+    const maxScroll = Math.max(0, totalW - viewportW);
+    if (!(this.invScrollX >= 0)) this.invScrollX = 0;
+    if (this.invScrollX > maxScroll) this.invScrollX = maxScroll;
+
+    const first = Math.max(0, Math.floor(this.invScrollX / step) - 1);
+    const last = Math.min(list.length - 1, Math.ceil((this.invScrollX + viewportW) / step) + 1);
+
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(padX - 2, railY - 2, viewportW + 4, railH + 4);
+    ctx.clip();
+    for (let i = first; i <= last; i++) {
+      const bb = list[i];
+      const x = padX + i * step - this.invScrollX;
+      const rect = { x, y: railY, w: cardW, h: railH, beyblade: bb };
+      // 只注册与可视区相交的卡片，避免命中被裁剪掉的卡
+      if (rect.x + rect.w > padX && rect.x < padX + viewportW) this.gridRects.push(rect);
+      this._drawInvCard(ctx, rect, bb);
+    }
+    ctx.restore();
+
+    // 底部：滚动进度条 + 左右箭头（沿用 inv_prev / inv_next / inv_page 三个 action）
+    const pY = railY + railH + 6;
+    if (maxScroll > 0) {
+      const arrowW = 22, arrowH = 20;
+      const leftRect  = { x: padX,                       y: pY, w: arrowW, h: arrowH, action: 'inv_prev' };
+      const rightRect = { x: padX + viewportW - arrowW,  y: pY, w: arrowW, h: arrowH, action: 'inv_next' };
+      this._drawChevron(leftRect, this.invScrollX > 0);
+      this._drawChevron(rightRect, this.invScrollX < maxScroll);
+      this.buttons.push(leftRect, rightRect);
+      const barX = padX + arrowW + 6;
+      const barW = Math.max(20, viewportW - (arrowW + 6) * 2);
+      const barY = pY + arrowH / 2 - 2;
+      ctx.save();
+      ctx.fillStyle = 'rgba(255,255,255,0.12)';
+      this.roundRect(barX, barY, barW, 4, 2); ctx.fill();
+      const thumbW = Math.max(24, barW * (viewportW / Math.max(1, totalW)));
+      const thumbX = barX + (barW - thumbW) * (this.invScrollX / maxScroll);
+      ctx.fillStyle = '#ffd54f';
+      this.roundRect(thumbX, barY, thumbW, 4, 2); ctx.fill();
+      ctx.restore();
+      // 中点：保留「长按陀螺可出售」提示入口
+      this.buttons.push({ x: barX, y: pY, w: barW, h: arrowH, action: 'inv_page' });
+    }
+  }
+
+  /** 单张陈列卡：品质渐变底 + 稀有度光晕 + 陀螺大图 + 品质名 + 等级角标 */
+  _drawInvCard(ctx, r, bb) {
+    const tier = bb.tier || {};
+    const color = tier.color || '#9e9e9e';
+    const rIdx = (typeof bb.tierIndex === 'number') ? bb.tierIndex : 0;
+    ctx.save();
+    // 卡片底（上亮下暗，展柜玻璃感）
+    const g = this._grad('invcard|' + rIdx + '|' + Math.round(r.w) + '|' + Math.round(r.h), () => {
+      const gg = ctx.createLinearGradient(r.x, r.y, r.x, r.y + r.h);
+      gg.addColorStop(0, 'rgba(255,255,255,0.11)');
+      gg.addColorStop(1, 'rgba(255,255,255,0.03)');
+      return gg;
+    });
+    ctx.fillStyle = g;
+    // 稀有度光晕：品质越高越亮
+    ctx.shadowColor = color;
+    ctx.shadowBlur = (rIdx >= 3 ? 10 : (rIdx >= 2 ? 6 : 3)) * this.shadowScale;
+    this.roundRect(r.x, r.y, r.w, r.h, 12);
+    ctx.fill();
+    ctx.shadowBlur = 0;
+    // 品质色描边
+    ctx.strokeStyle = color;
+    ctx.lineWidth = rIdx >= 3 ? 2 : 1.4;
+    ctx.stroke();
+    // 陀螺大图（居中偏上）
+    // maxSize = r.w*0.88 → 陀螺直径占卡片宽度的 88%（原 0.78 偏空）。
+    // 上限取 0.88 而非更高：卡片是竖长卡（cardW ≈ 0.74×railH），陀螺底部须避开
+    // 「品质名」（r.h-14 处、10px 字），实测留约 7.5px；左上角 Lv 角标在陀螺之后绘制、
+    // 覆盖于其上不受影响，仅与陀螺圆顶右侧极小范围交叠。
+    drawBeyblade(ctx, r.x + r.w / 2, r.y + r.h * 0.44, bb,
+      Math.max(0.3, r.w / 100), { maxSize: r.w * 0.88, uniformSize: true });
+    // 品质名
+    ctx.fillStyle = color;
+    ctx.font = 'bold 10px ' + APPLE_FONT;
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(tier.name || '', r.x + r.w / 2, r.y + r.h - 14);
+    // 等级角标
+    ctx.fillStyle = 'rgba(0,0,0,0.5)';
+    this.roundRect(r.x + 4, r.y + 4, 28, 15, 7); ctx.fill();
+    ctx.fillStyle = '#ffd54f';
+    ctx.font = 'bold 10px ' + APPLE_FONT;
+    ctx.fillText('Lv' + (bb.level || 1), r.x + 18, r.y + 12);
+    ctx.restore();
   }
 
   /** 分页器左右箭头（苹果风 chevron，enabled=false 时置灰） */
@@ -1545,7 +2364,8 @@ class Renderer {
 
     const cnt = this.game.codexCount();
     const total = this.game.codexTotal();
-    const cntY = L.titleY + 2;
+    // 头部独立带：标题锚在 Tab 条下方的 codexHeaderTop（不再与 Tab 同 Y 叠压），进度条锚在 codexProgY
+    const cntY = L.codexHeaderTop;
 
     // 顶部标题 + 集齐状态（对齐 Title 区内标题行 y，不挤占 Tab）
     ctx.textAlign = 'center';
@@ -1568,25 +2388,14 @@ class Renderer {
       ctx.fillText('图鉴  ' + cnt + ' / ' + total, W / 2, cntY);
     }
 
-    // 批次C·策略系统（play-design v1）：图鉴头部克制链小胶囊（五行相克：金克木、木克土、土克水、水克火、火克金）
-    ctx.save();
-    const ckW = 110, ckH = 16, ckX = 14, ckY = cntY + 1;
-    ctx.fillStyle = 'rgba(255,255,255,0.10)';
-    this.roundRect(ckX, ckY, ckW, ckH, 8); ctx.fill();
-    ctx.strokeStyle = 'rgba(255,255,255,0.18)'; ctx.lineWidth = 1;
-    this.roundRect(ckX + 0.5, ckY + 0.5, ckW - 1, ckH - 1, 8); ctx.stroke();
-    ctx.fillStyle = 'rgba(255,255,255,0.55)';
-    ctx.font = '9px ' + APPLE_FONT;
-    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
-    ctx.fillText('金>木>土>水>火', ckX + ckW / 2, ckY + ckH / 2 + 0.5);
-    ctx.restore();
+    // （已移除图鉴顶部静止的「金>木>土>水>火」胶囊——五行策略改为点击陀螺详情查看，顶部更干净）
 
     // 收集进度条：标题下方细条（金色渐变 + 百分比），给长期目标感
     // 增加呼吸感：标题和进度条间距22→26，进度条和横幅间距8→12
     const pct = total > 0 ? cnt / total : 0;
     const pW = Math.min(210, W - 130);
     const pX = W / 2 - pW / 2;
-    const pY = cntY + 26;
+    const pY = L.codexProgY;
     ctx.fillStyle = 'rgba(255,255,255,0.12)';
     this.roundRect(pX, pY, pW, 5, 2.5); ctx.fill();
     if (pct > 0) {
@@ -1603,61 +2412,8 @@ class Renderer {
     ctx.font = '10px ' + APPLE_FONT;
     ctx.fillText(Math.floor(pct * 100) + '%', W / 2 + pW / 2 + 6, pY - 2);
 
-    // 图鉴阶段奖励横幅（play-design v1）：收集 5/10/15/20 档发大奖
-    // 增加呼吸感：进度条和横幅间距8→12
-    if (typeof this.game.codexNextStage === 'function') {
-      const next = this.game.codexNextStage();
-      const stages = this.game.codexStages();
-      const claimed = this.game.codexClaimed || 0;
-      const bY = pY + 60, bH = 24; // 横幅往下移50px（原pY+10→pY+60）
-      const bX = 14, bW = W - 28;
-      if (next) {
-        // 有可领阶段：金色可领横幅
-        ctx.save();
-        const bg2 = this._grad('codexR|' + Math.round(bX) + '|' + Math.round(bY), () => {
-          const gg = ctx.createLinearGradient(bX, bY, bX + bW, bY);
-          gg.addColorStop(0, 'rgba(255,213,79,0.22)');
-          gg.addColorStop(1, 'rgba(255,152,0,0.18)');
-          return gg;
-        });
-        ctx.fillStyle = bg2;
-        this.roundRect(bX, bY, bW, bH, bH / 2); ctx.fill();
-        ctx.strokeStyle = 'rgba(255,213,79,0.7)'; ctx.lineWidth = 1.2;
-        this.roundRect(bX + 0.6, bY + 0.6, bW - 1.2, bH - 1.2, bH / 2 - 0.6); ctx.stroke();
-        ctx.fillStyle = '#ffd54f';
-        ctx.font = 'bold 12px ' + APPLE_FONT;
-        ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
-        ctx.fillText('收集 ' + cnt + '/' + total + ' · 可领「' + next.title + '」大奖', bX + 14, bY + bH / 2 + 0.5);
-        // 领取按钮
-        const ckW = 64, ckH = 22;
-        const ck = { x: bX + bW - ckW - 8, y: bY + (bH - ckH) / 2, w: ckW, h: ckH, action: 'codex_claim' };
-        this.drawButton(ck.x, ck.y, ck.w, ck.h, '领取', '#ffb300');
-        this.buttons.push(ck);
-        ctx.restore();
-      } else {
-        // 已领完 / 未达：进度提示条
-        const doneAll = claimed >= 20;
-        ctx.fillStyle = 'rgba(255,255,255,0.06)';
-        this.roundRect(bX, bY, bW, bH, bH / 2); ctx.fill();
-        ctx.strokeStyle = 'rgba(255,255,255,0.14)'; ctx.lineWidth = 1;
-        this.roundRect(bX + 0.5, bY + 0.5, bW - 1, bH - 1, bH / 2); ctx.stroke();
-        ctx.fillStyle = doneAll ? '#ffd54f' : 'rgba(255,255,255,0.55)';
-        ctx.font = 'bold 11px ' + APPLE_FONT;
-        ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
-        if (doneAll) {
-          // 图标资产 v3：两侧 ★ → icon-star.png
-          const skinTxt = '全图鉴·大师 限定皮肤已解锁';
-          const skinTw = mtW(ctx, skinTxt);
-          ctx.fillText(skinTxt, W / 2, bY + bH / 2);
-          this._drawPngIcon('star', W / 2 - skinTw / 2 - 12, bY + bH / 2, 13);
-          this._drawPngIcon('star', W / 2 + skinTw / 2 + 12, bY + bH / 2, 13);
-        }
-        else {
-          const ns = stages.find(s => s.n > claimed);
-          ctx.fillText('已领 ' + claimed + ' 档 · 收集 ' + (ns ? ns.n : total) + '/' + total + ' 解锁「' + (ns ? ns.title : '-') + '」', W / 2, bY + bH / 2);
-        }
-      }
-    }
+    // 阶段奖励横幅（收集 5/10/15/20 档发大奖）下移到底部细条，给顶部留呼吸感
+    this._drawCodexFooter(ctx);
 
     const startY = L.codexStartY;
     const rowH = L.codexRowH;
@@ -1741,10 +2497,14 @@ class Renderer {
           ctx.stroke();
         }
         if (unlocked) {
-          const bb = new Beyblade(t, l);
+          // 图鉴格子按 t:l 缓存 Beyblade 实例：原每帧每格 new Beyblade（约30次/帧），且构造随机 angle 致角度抖动；
+          // drawBeyblade 仅读 bb（tierIndex/level/angle/radius），从不 mutate → 复用安全，角度稳定。
+          const _ck = t + ':' + l;
+          const bb = this._codexBbCache[_ck] || (this._codexBbCache[_ck] = new Beyblade(t, l));
           // 陀螺图标在方块容器以内，所有等级尺寸一致（uniformSize）
           // 绘制大小按 radius*2*scale 计算（和对战页面一致），scale和maxSize调整到合适大小
-          drawBeyblade(ctx, ccx, cyy, bb, Math.max(0.3, topCell / 100), { maxSize: topCell * 0.88, uniformSize: true });
+          // maxSize = topCell*0.94 → 陀螺直径占格子的 94%（原 0.88，四边留白 6% 视觉偏空）
+          drawBeyblade(ctx, ccx, cyy, bb, Math.max(0.3, topCell / 100), { maxSize: topCell * 0.94, uniformSize: true });
         } else {
           // 图标资产 v3：图鉴未解锁 ? → icon-lock.png（更暗更灰）
           ctx.globalAlpha = 0.4;
@@ -1754,6 +2514,65 @@ class Renderer {
         // 等级数字已在陀螺本体中央显示（beyblade.js sprite），无需额外 Lv 徽章
       }
     }
+  }
+
+  // 图鉴阶段奖励：从顶部下移到底部细条（解放顶部、给网格更多呼吸感）。
+  // 复用游戏进度数据（codexNextStage / codexStages / codexClaimed），领取逻辑不变（action='codex_claim'）。
+  _drawCodexFooter(ctx) {
+    if (typeof this.game.codexNextStage !== 'function') return;
+    const L = this.layout;
+    const W = L.W, H = L.H, SB = L.SB;
+    const fh = L.codexFooterH || 52;
+    const bandTop = H - SB - fh;          // 底部带顶（网格已让出此空间）
+    const bX = 14, bW = W - 28, bH = 34;
+    const bY = bandTop + (fh - bH) / 2;
+
+    const cnt = this.game.codexCount();
+    const total = this.game.codexTotal();
+    const claimed = this.game.codexClaimed || 0;
+    const next = this.game.codexNextStage();
+    const stages = this.game.codexStages();
+
+    ctx.save();
+    if (next) {
+      // 有可领阶段：金色可领横幅（底部细条）
+      const bg2 = this._grad('codexFtr|' + Math.round(bX) + '|' + Math.round(bY), () => {
+        const gg = ctx.createLinearGradient(bX, bY, bX + bW, bY);
+        gg.addColorStop(0, 'rgba(255,213,79,0.22)');
+        gg.addColorStop(1, 'rgba(255,152,0,0.18)');
+        return gg;
+      });
+      ctx.fillStyle = bg2;
+      this.roundRect(bX, bY, bW, bH, bH / 2); ctx.fill();
+      ctx.strokeStyle = 'rgba(255,213,79,0.7)'; ctx.lineWidth = 1.2;
+      this.roundRect(bX + 0.6, bY + 0.6, bW - 1.2, bH - 1.2, bH / 2 - 0.6); ctx.stroke();
+      ctx.fillStyle = '#ffd54f';
+      ctx.font = 'bold 12px ' + APPLE_FONT;
+      ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
+      ctx.fillText('收集 ' + cnt + '/' + total + ' · 可领「' + next.title + '」大奖', bX + 14, bY + bH / 2 + 0.5);
+      // 领取按钮
+      const ckW = 60, ckH = 26;
+      const ck = { x: bX + bW - ckW - 8, y: bY + (bH - ckH) / 2, w: ckW, h: ckH, action: 'codex_claim' };
+      this.drawButton(ck.x, ck.y, ck.w, ck.h, '领取', '#ffb300');
+      this.buttons.push(ck);
+    } else {
+      // 已领完 / 未达：进度提示条
+      const doneAll = claimed >= 20;
+      ctx.fillStyle = 'rgba(255,255,255,0.06)';
+      this.roundRect(bX, bY, bW, bH, bH / 2); ctx.fill();
+      ctx.strokeStyle = 'rgba(255,255,255,0.14)'; ctx.lineWidth = 1;
+      this.roundRect(bX + 0.5, bY + 0.5, bW - 1, bH - 1, bH / 2); ctx.stroke();
+      ctx.fillStyle = doneAll ? '#ffd54f' : 'rgba(255,255,255,0.55)';
+      ctx.font = 'bold 11px ' + APPLE_FONT;
+      ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+      if (doneAll) {
+        ctx.fillText('全图鉴·大师 限定皮肤已解锁', W / 2, bY + bH / 2);
+      } else {
+        const ns = stages.find(s => s.n > claimed);
+        ctx.fillText('已领 ' + claimed + ' 档 · 收集 ' + (ns ? ns.n : total) + '/' + total + ' 解锁「' + (ns ? ns.title : '-') + '」', W / 2, bY + bH / 2);
+      }
+    }
+    ctx.restore();
   }
 
   _mergeablePair() {
@@ -2049,9 +2868,12 @@ class Renderer {
     ctx.restore();
     ctx.strokeStyle = border || '#ffd54f'; ctx.lineWidth = 2;
     this.roundRect(bx + 1, by + 1, bw - 2, bh - 2, 20); ctx.stroke();
-    const hl = ctx.createLinearGradient(bx + 12, by, bx + 12, by + 14);
-    hl.addColorStop(0, 'rgba(255,255,255,0.5)');
-    hl.addColorStop(1, 'rgba(255,255,255,0)');
+    const hl = this._gradFor(ctx, 'btnhl|' + (bx + 12) + '|' + by + '|' + (bx + 12) + '|' + (by + 14), () => {
+      const g = ctx.createLinearGradient(bx + 12, by, bx + 12, by + 14);
+      g.addColorStop(0, 'rgba(255,255,255,0.5)');
+      g.addColorStop(1, 'rgba(255,255,255,0)');
+      return g;
+    });
     ctx.fillStyle = hl;
     this.roundRect(bx + 12, by, bw - 24, 14, 7); ctx.fill();
   }
@@ -2115,7 +2937,7 @@ class Renderer {
       } else if (rect.icon === 'codex') {
         // 图鉴：icon-codex.png（金色小陀螺）；缺失时回退矢量陀螺
         if (!this._drawPngIcon('codex', icoCx, icoCy, iconS + 4)) {
-          drawBeyblade(ctx, icoCx, icoCy, new Beyblade(0, 1), 0.42);
+          drawBeyblade(ctx, icoCx, icoCy, this._codexBbCache['0:1'] || (this._codexBbCache['0:1'] = new Beyblade(0, 1)), 0.42);
         }
       }
     }
@@ -2135,6 +2957,8 @@ class Renderer {
     const b = this.game.battle;
     if (!b) return;
     b._fxLow = this.shadowScale === 0; // 同步低端档：关闭对战陀螺软光晕
+    // 把当前按下的按钮 action 透传给战斗，使结算页自绘按钮也能呈现"按下态"
+    b._pressedAction = (this.pressedBtn && this.pressedBtn.rect && this.pressedBtn.rect.action) || null;
     const rects = b.draw(this.ctx);
     if (rects && rects.length) for (let i = 0; i < rects.length; i++) this.buttons.push(rects[i]);
   }
@@ -2155,6 +2979,42 @@ class Renderer {
       ctx.textBaseline = 'middle';
       ctx.fillText(f.text, f.x, f.y);
     }
+    ctx.globalAlpha = 1;
+  }
+
+  /**
+   * 首程直达轻引导（2026-09-04）：呼吸光圈 + 按钮上方短文案。
+   * 与旧 drawTutorial（全屏遮罩+引导卡）完全不同——不打断、不挡操作、不弹窗。
+   * 仅主页且 obStep>0 时绘制；obDone 后永远不画。
+   */
+  _drawObGlow() {
+    const g = this.game;
+    if (!g || g.obDone || !g.obStep || g.mode !== 'main') return;
+    if (g.view !== 'main' && g.view !== 'home') return; // 图鉴等子视图不画
+    const target = g.obStep === 1 ? this.drawBtnRect : this.battleBtnRect;
+    if (!target) return;
+    const ctx = this.ctx;
+    const t = Date.now() / 600;
+    const pulse = 0.5 + 0.5 * Math.sin(t * Math.PI * 2);
+    // 呼吸光圈 + 外扩扩散环（画法沿用旧 drawTutorial 的目标高亮，去掉遮罩与卡片）
+    ctx.strokeStyle = '#ffd54f';
+    ctx.globalAlpha = 0.55 + 0.4 * pulse;
+    ctx.lineWidth = 2.5;
+    const ex = 6 + pulse * 3;
+    this.roundRect(target.x - ex, target.y - ex, target.w + ex * 2, target.h + ex * 2, Math.min(16, target.h / 2 + ex));
+    ctx.stroke();
+    ctx.globalAlpha = Math.max(0, 0.5 - pulse * 0.5);
+    ctx.lineWidth = 3;
+    ctx.beginPath();
+    ctx.arc(target.x + target.w / 2, target.y + target.h / 2, 10 + pulse * 26, 0, Math.PI * 2);
+    ctx.stroke();
+    // 按钮上方短文案（脉动浮现，不遮按钮）
+    ctx.globalAlpha = 0.65 + 0.35 * pulse;
+    ctx.fillStyle = '#ffd54f';
+    ctx.font = 'bold 13px ' + APPLE_FONT;
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'bottom';
+    ctx.fillText(g.obStep === 1 ? '先抽一只陀螺 ↓' : '陀螺到手，去对战！', target.x + target.w / 2, target.y - ex - 4);
     ctx.globalAlpha = 1;
   }
 
@@ -2420,11 +3280,12 @@ class Renderer {
 
     // 确认按钮（翻转完成后出现）
     if (revealDone) {
-      const btnW = 170, btnH = 44;
-      const btnY = cy + ch / 2 + 34;
-      const btn = { x: cx - btnW / 2, y: btnY, w: btnW, h: btnH, action: 'draw_close' };
+      const btnW = 180, btnH = 44;
+      const closeY = cy + ch / 2 + 34;
+      const btn = { x: cx - btnW / 2, y: closeY, w: btnW, h: btnH, action: 'draw_close' };
       this.drawButton(btn.x, btn.y, btn.w, btn.h, '收入背包', isLegend ? '#ff9800' : '#2196f3');
       this.modalRects.push(btn);
+      // 抽卡激励广告（draw3/6/9/rand 命中时）改为「收卡即自动弹激励视频」（隐藏式、无按钮），见 main.js _dismissDrawCard。
     }
   }
 
@@ -3122,33 +3983,23 @@ class Renderer {
     ctx.font = '10px ' + APPLE_FONT;
     ctx.fillText('剩 ' + (chest ? chest.count : 0) + ' 个', w / 2, chestY + 58);
 
-    // 关闭按钮（右上角 ✕）：任何状态下都可关闭弹窗返回游戏，防卡死
-    const closeBtn = { x: bx + bw - 34, y: by + 10, w: 24, h: 24, action: 'chest_close' };
-    this.drawButton(closeBtn.x, closeBtn.y, closeBtn.w, closeBtn.h, '✕', 'rgba(255,255,255,0.18)');
-    this.modalRects.push(closeBtn);
+    // 关闭按钮：统一圆形胶囊 + icon-close.png + 按下态（drawCloseX），与全部 9 个面板一致（P2-2/2-5 一致性）
+    this.drawCloseX('chest_close', bx, by, bw);
 
-    // 按钮：看广告开（金）/ 直接开（紫）；广告不可用时降级为「免费开启」
-    const btnW = 132, btnH = 40, gap = 10;
-    const totalW = btnW * 2 + gap;
+    // 按钮：单一「开启」——当日首次免费开，之后每次需看广告开（看完广告才开箱）
     const adBroken = !!this.game.chestAdBroken;
-    const adBtn = { x: w / 2 - totalW / 2, y: by + bh - 52, w: btnW, h: btnH, action: adBroken ? 'chest_free_force' : 'chest_ad' };
-    const freeBtn = { x: w / 2 + gap / 2, y: by + bh - 52, w: btnW, h: btnH, action: 'chest_free' };
-    if (adBroken) {
-      this.drawButton(adBtn.x, adBtn.y, adBtn.w, adBtn.h, '免费开启', '#43a047');
-    } else {
-      this.drawButton(adBtn.x, adBtn.y, adBtn.w, adBtn.h, '看广告开', '#ffb300');
-    }
-    this.drawButton(freeBtn.x, freeBtn.y, freeBtn.w, freeBtn.h, '直接开', '#7e57c2');
-    this.modalRects.push(adBtn, freeBtn);
-    ctx.fillStyle = 'rgba(255,255,255,0.5)';
+    const freeAvail = typeof this.game.isChestFreeOpenAvailable === 'function' && this.game.isChestFreeOpenAvailable();
+    const btnW = 200, btnH = 44, btnY = by + bh - 64;
+    const openBtn = { x: w / 2 - btnW / 2, y: btnY, w: btnW, h: btnH, action: 'chest_open' };
+    let openLabel = '看广告开启', openColor = '#ffb300', openHint = '看完广告即可开启';
+    if (freeAvail) { openLabel = '开启'; openColor = '#43a047'; openHint = '今日首次免费开启'; }
+    else if (adBroken) { openLabel = '开启'; openColor = '#43a047'; openHint = '广告暂不可用 · 已免费开启'; }
+    this.drawButton(openBtn.x, openBtn.y, openBtn.w, openBtn.h, openLabel, openColor);
+    this.modalRects.push(openBtn);
+    ctx.fillStyle = (freeAvail || adBroken) ? 'rgba(129,199,132,0.95)' : 'rgba(255,255,255,0.5)';
     ctx.font = '9px ' + APPLE_FONT;
-    if (adBroken) {
-      ctx.fillStyle = 'rgba(129,199,132,0.95)';
-      ctx.fillText('广告暂不可用 · 已切换免费开启', w / 2, by + bh - 18);
-    } else {
-      ctx.fillStyle = 'rgba(255,255,255,0.5)';
-      ctx.fillText('直接开每日限 1 次', w / 2, by + bh - 18);
-    }
+    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.fillText(openHint, w / 2, by + bh - 18);
 
     ctx.restore();
   }
@@ -3610,8 +4461,23 @@ class Renderer {
     }
     if (shX || shY) { this.ctx.save(); this.ctx.translate(shX, shY); }
 
+    const v2 = this.game.homeV2 !== false;
     if (this.game.mode === 'battle' && this.game.battle) {
       this.drawSpintopBattle(dt);
+    } else if (v2) {
+      // V2 游戏化骨架：顶栏 HUD + 视图切换条（无大标题）+ 圆盘主舞台 + 异形主次按钮
+      this.drawBackground();
+      this.drawHeader();
+      this.drawViewTabs();
+      if (this.game.view === 'codex') {
+        this.drawCodex();
+      } else {
+        this.drawForgeV2(dt);
+        this.drawHomeActions();
+        this.drawFiltersAndDraw();
+        if (this.invRailV2On()) this.drawInventoryRailV2();
+        else this.drawInventory();
+      }
     } else {
       this.drawBackground();
       this.drawHeader();
@@ -3646,4 +4512,4 @@ class Renderer {
   }
 }
 
-module.exports = { Renderer };
+module.exports = { Renderer, clearMeasureTextCache, capForLevel };

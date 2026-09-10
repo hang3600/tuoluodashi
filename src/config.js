@@ -10,14 +10,34 @@ const CONFIG = {
   //     （见 analytics.js），不再依赖此字段做切片。
   version: '1.0.0',
 
-  // 激励视频广告位 ID（单一真源；已确认为真实流量主广告位 adunit-1183de0d72298c4d，上线前勿改）
+  // 激励视频广告位 ID（默认位真源；已确认真实流量主广告位 adunit-1183de0d72298c4d，上线前勿改）
+  // 复活 / 看广告能量 等场景使用此默认位。
   adUnitId: 'adunit-1183de0d72298c4d',
 
+  // 看广告回能量独立广告位（用户 2026-08-30 回填：adunit-af16958aaf84edbf）。
+  // 与默认位 / 宝箱位分开：能量位点击频率高，独立位便于在 MP 后台单独看填充/曝光数据，
+  // 也避免"能量位失败连坐默认位 / 宝箱位"。必须是「激励视频」类型。
+  energyAdUnitId: 'adunit-af16958aaf84edbf',
+
+  // 青铜宝箱「看广告开」独立广告位（用户 2026-08-30 回填：adunit-9d11e5b028812190）。
+  // 与默认位分开：宝箱恰好在战斗刚胜利、主线程最忙的瞬间被快速点击，独立位可避免
+  // 「宝箱位失败连坐默认位」、也便于在 MP 后台单独看宝箱位的填充/曝光数据。
+  // 注意：必须是「激励视频」类型（与默认位同级），不能复用插屏位 ID。
+  chestAdUnitId: 'adunit-9d11e5b028812190',
+
   // 插屏广告位 ID（隐藏式自动弹广告用）—— ⚠️ 与上面激励视频是「两套独立广告位」！
-  // 必须去 MP 后台「流量主 → 广告位 → 插屏广告」单独新建一个，把分配的新 ID 填这里；
-  // 不能直接复用上面的激励视频 ID（类型不同，复用会被微信拒绝/不展示）。
-  // 单一点位已确认：adunit-6543c4bf1cb6c43f（插屏广告位 ID，2026-08-30 用户回填）。
-  interstitialAdUnitId: 'adunit-6543c4bf1cb6c43f',
+  // 必须去 MP 后台「流量主 → 广告位 → 插屏广告」单独新建，类型选「插屏」，不能直接复用激励视频 ID。
+  // 抽卡激励广告位（2026-09-06 用户换 ID，且确认 MP 后台建为「激励视频」类型）：
+  //   收卡时自动弹出激励视频（隐藏式、无按钮，等同原「隐藏插屏」行为；仅第3/6/9抽+逢2随机触发）。4 个独立位按抽数分配：
+  //   draw3  第3抽 → adunit-4729d5af4e1dabc8
+  //   draw6  第6抽 → adunit-f02da65fdd7f378f
+  //   draw9  第9抽 → adunit-b87930618c41419e
+  //   rand2  逢2的倍数随机 → adunit-af96563df3ed4e15
+  // ⚠️ 必须是「激励视频」类型（与默认位/能量位/宝箱位同级）；走 Rewarded.show 按 adUnitId 懒加载，不进 Interstitial。
+  drawAdUnitId3: 'adunit-4729d5af4e1dabc8',
+  drawAdUnitId6: 'adunit-f02da65fdd7f378f',
+  drawAdUnitId9: 'adunit-b87930618c41419e',
+  drawAdUnitIdRand: 'adunit-af96563df3ed4e15',
 
   // 游戏圈 openlink：必须是短 token（形如 xxxxxxx-xxxxxx），不是浏览器 URL。
   // 唯一正确取法：登录 mp.weixin.qq.com → 游戏能力地图 → 游戏圈 → 基础设置 / 帖子·话题列表，
@@ -37,15 +57,59 @@ const CONFIG = {
   //   boot            启动
   //   battleStart     每局开始（branchDim 自动传 stage 关卡号 1-100）
   //   firstBattleDone 首局完成（每用户一生仅一次）
+  //   draw            抽卡（branchDim 自动传抽到稀有度 1-5）
+  //   merge           合成（branchDim 自动传产物稀有度 1-5）
+  //   battleDefeat    战败（branchDim 自动传关卡 stage 1-100）
+  //   share           分享成功（无维度）
+  //   adWatch         激励视频看完（无维度）
   // 留空 = 不上报（避免空打）；填好即自动生效，无需改业务逻辑。
   analyticsBranch: {
     boot: '',
     battleStart: '',
-    firstBattleDone: ''
+    firstBattleDone: '',
+    draw: '',
+    merge: '',
+    battleDefeat: '',
+    share: '',
+    adWatch: ''
+  },
+
+  // 生产崩溃上报（运维中心，零后端）
+  // ==========================================================================
+  // 两条通道都基于微信「运维中心」，无需自建服务器：
+  //   gameLog : 小游戏实时日志（base lib 3.7.4+，wx.getGameLogManager）。
+  //             把完整 errorLog（source/message/stack 截断/设备/游戏状态）写进去，
+  //             后台「运维中心 → 小游戏实时日志」按 openid 可查，真机偶发崩溃可定位。
+  //   eventId : 崩溃计数事件 ID。capture() 会 wx.reportEvent(eventId, {crash_count:1, source})
+  //             把崩溃计数 +1，可在后台看趋势 / 设预警。
+  //             ⚠️ 注意：wx.reportMonitor 自基础库 2.31.1 起「停止维护」，本项目基础库
+  //             3.17.1 必须用 wx.reportEvent；事件在「运维中心 / WE分析 → 数据管理 →
+  //             上报管理」新建（事件名必须与此 eventId 完全一致，最多 128 个）。
+  //             留空 = 不上报计数（仅走实时日志），降级安全。
+  // 两条通道都 `typeof wx` + API 存在性 + devtools 守卫，缺失即静默跳过、绝不抛错。
+  crashReport: {
+    gameLog: true,
+    eventId: 'bb_crash'
   },
 
   // 分享卡片图片
-  shareCardImage: 'images/share-card.jpg'
+  shareCardImage: 'images/share-card.jpg',
+
+  // 一次性订阅消息模板（留存拉回：次日提醒玩家回来签到/领体力）
+  // ==========================================================================
+  // ⚠️ 必须先在 MP 后台申请，再把模板 ID 填进来，否则订阅封装会静默 no-op（不弹不报错）。
+  // 申请路径：mp.weixin.qq.com → 功能 → 订阅消息 → 一次性订阅模板 → 选用/申请「系统通知类」模板，
+  //   例如：「每日签到提醒」「体力恢复提醒」「离线收益领取提醒」（关键词自拟，过审即用）。
+  //   每个模板分配一个 templateId（形如 0Sxyz...），复制到下面对应 key。
+  // 调用点：main.js 在 sign_claim（签到成功）/ return_claim（领回归礼包）用户手势内触发，
+  //   通过 wx.requestSubscribeMessage 请求对应场景的模板授权；授权后微信可在次日给玩家下发服务通知，拉回 D1 留存。
+  // 注意：一次性订阅每次授权仅当次有效，需玩家每次主动触发；不要指望一次授权永久生效。
+  //   留空 = 不弹订阅（安全降级），不影响任何现有功能。
+  subscribeTemplates: {
+    daily:   't7eOtI7N4xfKWMXditAif1pSd0GHE6xAUiDkMEBiO-k', // 每日登录提醒（MP 后台申请的 templateId，已填 → 订阅生效）
+    energy:  'd1rxqpkdmCq03l1yvSX4QHWif93dLFJ-MEuPf2-6CNw', // 体力恢复提醒（MP 后台申请的 templateId，已填 → 订阅生效）
+    offline: 'eSUW_kfbp_4X2xYMiQBycjlve786bkkdvodtu-yo4NA'  // 离线收益领取提醒（MP 后台申请的 templateId，已填 → 订阅生效）
+  }
 };
 
 module.exports = {

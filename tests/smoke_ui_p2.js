@@ -149,6 +149,18 @@ console.log('\n【P2-5/2-7】面板外壳统一（8 面板均无头绘制通过 
   runPanel('drawLevelPanel', r, () => r.drawLevelPanel(), true);
   runPanel('drawReturnPanel', r, () => r.drawReturnPanel(), true);
   runPanel('drawBattleChestPanel', r, () => r.drawBattleChestPanel(), true); // 关闭为 chest_close
+  // 青铜宝箱「开启」按钮门控（2026-08-31）：合并单一按钮 chest_open，首次免费/之后看广告
+  {
+    const r2 = makeRenderer();
+    r2.game = setUpGame();
+    r2.game.battleChest = { quality: 0, count: 2 };
+    r2.modalRects = [];
+    r2.drawBattleChestPanel();
+    const hasOpen = r2.modalRects.some(m => m.action === 'chest_open');
+    const oldBtns = r2.modalRects.filter(m => m.action === 'chest_ad' || m.action === 'chest_free' || m.action === 'chest_free_force');
+    ok('drawBattleChestPanel · 单一开启按钮 chest_open 已注册', hasOpen);
+    ok('drawBattleChestPanel · 旧 chest_ad/chest_free 按钮已移除', oldBtns.length === 0);
+  }
   runPanel('drawBoostPanel', r, () => r.drawBoostPanel(), true);
   runPanel('drawBuffPanel', r, () => r.drawBuffPanel(), true);
   // 特殊面板：无关闭 X

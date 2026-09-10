@@ -240,58 +240,100 @@ function drawVectorIcon(ctx, type, cx, cy, size, color) {
 }
 
 // ── 小游戏 PNG 加载加固 ───────────────────────────────────────────────
-// 历史坑：小游戏真机（iOS/Android）上 wx.createImage + dataURI 的 onload 时而不触发 / 不解码，
-// 导致 Image._ok 永远为 false、离屏烘焙与图标绘制永久走矢量/文字回退，而本地 DevTools 反而正常。
-// 最稳的修复：把 base64 写入 wx.env.USER_DATA_PATH 本地文件，再用「文件路径」加载（真机最稳路径）。
+// 真机加载策略（v7 终解）：真机直接用「包内文件路径 + wx.createImage」加载——包内 PNG/JPG
+// 随代码包分发，是微信小游戏最稳的资源加载路径，无需联网 / 写盘 / base64 bake。
+// 模拟器（platform==='devtools'）保留内嵌 data URI（零 HTTP、规避模拟器路径解析差异）。
 // 这些函数被 beyblade/spintop/render 共用；并入 utils（而非独立模块）以避免微信增量打包漏收新文件。
-
-// 把 base64 dataURI 写入 USER_DATA_PATH，返回本地文件绝对路径；不可用时返回 null
-function bakeBase64ToUserPath(b64, fileName) {
-  try {
-    if (typeof wx === 'undefined' || !wx.getFileSystemManager || !wx.env || !wx.env.USER_DATA_PATH) return null;
-    const m = /^data:[^;]*;base64,(.*)$/.exec(b64 || '');
-    if (!m || !m[1]) return null;
-    const fs = wx.getFileSystemManager();
-    const dir = wx.env.USER_DATA_PATH + '/b64img';
-    try { fs.mkdirSync(dir); } catch (e) { /* 已存在则忽略 */ }
-    const filePath = dir + '/' + fileName;
-    fs.writeFileSync(filePath, m[1], 'base64');
-    return filePath;
-  } catch (e) { return null; }
-}
 
 // 内嵌 base64 资源地图（src/imgb64.js）：全部图标/陀螺以 data URI 内嵌，
 // 加载时优先用它，彻底规避 DevTools 模拟器「字符串/外部 PNG 路径 404」顽疾——加载不再发 HTTP 请求。
-const imgb64 = require('./imgb64');
+//
+// ⚠️ 必须 try/catch 守卫（2026-09-02 启动性能优化）：imgb64.js 已加入 game.json 的
+// packOptions.ignore —— 真机从不读它（真机 prepSrc 直接返回包内路径 images/<folder>/<file>），
+// 但那 549KB base64 仍要随包下载 + 被 JS 引擎解析，是首屏下载耗时的主要死重。
+// 文件仍保留在磁盘上（DevTools 本地编译不受 ignore 影响，模拟器预览照旧走 base64）；
+// 真机打包时被排除 → require 抛异常 → 此处兜底成空对象。
+// 若把这个守卫去掉，真机会因「模块缺失」直接崩在 require 上，务必保留。
+let imgb64 = {};
+try { imgb64 = require('./imgb64') || {}; } catch (e) { imgb64 = {}; }
 
-// 产出最终加载源：优先调用方传入的 base64 → 其次内嵌 base64 地图（必中）→ 极端缺失才回退包内文件路径。
-// 模拟器（platform==='devtools'）直接用 data URI（最稳）；真机把 base64 写到 USER_DATA_PATH 再用文件路径加载（最稳）。
+// 产出最终加载源：模拟器 → 内嵌 data URI；真机 → 包内文件路径 images/<folder>/<file>。
+// 真机为何用包内路径而非 data URI：battle/spintop.js（对战陀螺/HUD）与 src/render.js（图标）
+// 均走本函数，真机实测「包内 PNG + wx.createImage」稳定出图，且省去几百 KB base64 解码。
+// ⚠️ 已废弃方案，勿回退：曾试过「base64 → 写 USER_DATA_PATH 文件 → wx.loadImage」，
+// 真机失效；且 wx.loadImage 官方文档查无此 API（只有 wx.createImage）。
 function prepSrc(b64, file, folder) {
-  const real = b64 || ((imgb64[folder] || {})[file]) || null;
-  if (!real) return '/images/' + folder + '/' + file; // 内嵌缺失的兜底（真机/上传包可用）
-  const isDevtools = (typeof wx !== 'undefined' && wx.getSystemInfoSync && wx.getSystemInfoSync().platform === 'devtools');
-  if (isDevtools) return real; // 模拟器：data URI 最稳
-  const fp = bakeBase64ToUserPath(real, file); // 真机：写 USER_DATA_PATH 后用文件路径
-  return fp || real;
+  // 模拟器：内嵌 data URI 最稳（零 HTTP、不依赖包路径解析），保持原行为不变。
+  // 注意：真机启动瞬间 jsbridge 未就绪时 wx.getSystemInfoSync() 会抛异常
+  // （"[jsbridge] invoke getSystemInfo fail: jsbridge not ready"），必须 try/catch，
+  // 否则整条加载链被吞异常 → 资源永久缺失。异常时按真机处理（用包内路径，已验证可用）。
+  let isDevtools = false;
+  try {
+    isDevtools = !!(typeof wx !== 'undefined' && wx.getSystemInfoSync && wx.getSystemInfoSync().platform === 'devtools');
+  } catch (e) {
+    isDevtools = false;
+  }
+  // arena 背景已随 battle 分包分发（battle/images/arena/<file>）：主包不内置、分包不可互读，
+  // 故 arena 走 battle 分包内路径；其余资源仍在主包 images/<folder>/<file>。
+  const _pkg = (folder === 'arena') ? ('battle/images/' + folder) : ('images/' + folder);
+  if (isDevtools) {
+    const real = b64 || ((imgb64[folder] || {})[file]) || null;
+    return real || ('/' + _pkg + '/' + file); // 内嵌缺失兜底
+  }
+  // 真机：直接返回包内文件路径（wx.createImage + 包路径最稳），彻底绕开
+  // 「base64 → USER_DATA_PATH 文件 → wx.loadImage」在真机失效、导致全系矢量回退的顽疾。
+  // 包内 PNG/JPG 已随代码包分发（<pkg>/<folder>/<file>），无需联网/写盘/bake。
+  return _pkg + '/' + file;
 }
 
-// 统一加载单个图片：优先 wx.loadImage（Promise），回退 wx.createImage / 浏览器 Image + onload
+// 统一加载单个图片：优先 wx.createImage（小游戏最稳，包内路径 + data URI 均支持），
+// 包内路径自动尝试「无前导斜杠」「前导斜杠」两种写法以兼容不同机型。
 // cb(err, img)：成功时 err=null 且 img._ok=true
 function loadOne(src, cb) {
   try {
-    if (typeof wx !== 'undefined' && wx.loadImage) {
-      wx.loadImage(src).then(function (im) { im._ok = true; cb(null, im); })
-        .catch(function () { cb(new Error('loadImage fail')); });
-      return;
-    }
     const make = (typeof wx !== 'undefined' && wx.createImage) ? wx.createImage
       : (typeof Image !== 'undefined' ? function () { return new Image(); } : null);
     if (!make) { cb(new Error('no image api')); return; }
     const im = make();
+    im._ok = false;
+    // 候选 src：包内路径尝试两种斜杠写法；data URI（模拟器）直接加载。
+    const variants = [];
+    if (typeof src === 'string' && src.slice(0, 5) === 'data:') {
+      variants.push(src);
+    } else {
+      variants.push(src);
+      variants.push(src.charAt(0) === '/' ? src.slice(1) : '/' + src);
+    }
+    let vi = 0;
     im.onload = function () { im._ok = true; cb(null, im); };
-    im.onerror = function () { cb(new Error('img onerror')); };
-    im.src = src;
+    im.onerror = function () {
+      vi++;
+      if (vi < variants.length) { im.src = variants[vi]; }
+      else { cb(new Error('img load fail')); }
+    };
+    im.src = variants[0];
   } catch (e) { cb(e); }
+}
+
+// 把已加载图片按 maxDim 封顶降采样，限制解码内存（高端机 OOM 风险主因之一）。
+// 返回封顶尺寸的离屏画布（wx.createOffscreenCanvas / document 回退），过小则原样返回。
+// 无 wx/Image 的 headless 环境直接返回 im（测试不崩）。用于 home/arena/codex 等全分辨率 JPG 背景。
+function downscaleToCap(im, maxDim) {
+  if (!im) return im;
+  const iw = im.width || 0, ih = im.height || 0;
+  if (iw <= 0 || ih <= 0 || (iw <= maxDim && ih <= maxDim)) return im;
+  const s = Math.min(maxDim / iw, maxDim / ih);
+  const dw = Math.max(1, Math.round(iw * s)), dh = Math.max(1, Math.round(ih * s));
+  try {
+    let cv = null;
+    if (typeof wx !== 'undefined' && wx.createOffscreenCanvas) cv = wx.createOffscreenCanvas({ width: dw, height: dh });
+    else if (typeof document !== 'undefined' && document.createElement) { cv = document.createElement('canvas'); cv.width = dw; cv.height = dh; }
+    if (cv && cv.getContext) {
+      const c = cv.getContext('2d');
+      if (c) { c.drawImage(im, 0, 0, dw, dh); return cv; }
+    }
+  } catch (e) {}
+  return im;
 }
 
 module.exports = {
@@ -303,5 +345,6 @@ module.exports = {
   formatNumber0,
   drawVectorIcon,
   prepSrc,
-  loadOne
+  loadOne,
+  downscaleToCap
 };
