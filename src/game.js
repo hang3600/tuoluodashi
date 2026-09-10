@@ -62,6 +62,10 @@ class GameState {
 
     this.winStreak = 0;   // 对局连胜数：影响目标分数难度曲线，失败清零
 
+    // 双人合作守关战绩（纯战绩，不发金币/段位/能量，见 spintop _settle coop 闸门）
+    this.coopStage = 0;           // 合作通关最高关卡（仅战绩）
+    this.coopWins = 0;            // 合作通关次数（仅战绩）
+
     // 批次D·收尾（play-design v1）：隐藏传说彩蛋 / 对战掉落宝箱 / 好友助力
     this.mergeCount = 0;          // 累计合成次数（隐藏彩蛋触发条件）
     this.hiddenDrops = 0;         // 已获得隐藏传说次数（限次）
@@ -1008,6 +1012,8 @@ class GameState {
         refillDate: this.refillDate,
         refillCount: this.refillCount,
         winStreak: this.winStreak,
+        coopStage: this.coopStage,
+        coopWins: this.coopWins,
         pityEpic: this.pityEpic,
         pityLegend: this.pityLegend,
         dailyDate: this.dailyDate,
@@ -1080,7 +1086,14 @@ class GameState {
       this.dailyDate, (this.dailyTasks || [0, 0, 0]).join('.'), this.dailyActive, this.dailyChestClaimed ? 1 : 0,
       this.arenaPts, this.arenaWeek, this.arenaBest, this.arenaClaimedWeek,
       this.exp, this.level, this.codexClaimed,
+      this.coopStage, this.coopWins,
       col.join(',')].join('|');
+  }
+
+  /** 双人合作通关战绩（只记战绩不发资源）。由 spintop coop 胜利结算调用。 */
+  recordCoopWin(stage) {
+    this.coopWins++;
+    this.coopStage = Math.max(this.coopStage, Number(stage) || 1);
   }
 
   load() {
@@ -1129,6 +1142,8 @@ class GameState {
       this.refillDate = typeof data.refillDate === 'string' ? data.refillDate : '';
       this.refillCount = Math.max(0, Number(data.refillCount) || 0);
       this.winStreak = Math.max(0, Math.min(50, Number(data.winStreak) || 0));
+      this.coopStage = Math.max(0, Math.min(999, Number(data.coopStage) || 0));
+      this.coopWins = Math.max(0, Math.min(9999, Number(data.coopWins) || 0));
       this.pityEpic = Math.max(0, Math.min(10, Number(data.pityEpic) || 0));
       this.pityLegend = Math.max(0, Math.min(30, Number(data.pityLegend) || 0));
       this.dailyDate = typeof data.dailyDate === 'string' ? data.dailyDate : '';
@@ -1240,6 +1255,9 @@ class GameState {
       if (typeof migrated.boostDate !== 'string') migrated.boostDate = '';
       if (typeof migrated.boostCount !== 'number') migrated.boostCount = 0;
       if (typeof migrated.friendHigh !== 'number') migrated.friendHigh = 8000;
+      // v2新增：双人合作战绩（纯战绩，可选字段，无则不存默认 0）
+      if (typeof migrated.coopStage !== 'number') migrated.coopStage = 0;
+      if (typeof migrated.coopWins !== 'number') migrated.coopWins = 0;
       if (typeof migrated._shareEntryClaimed !== 'boolean') migrated._shareEntryClaimed = false;
       // v2新增：经验和等级系统
       if (typeof migrated.exp !== 'number') migrated.exp = 0;

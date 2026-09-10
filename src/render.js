@@ -1937,6 +1937,18 @@ class Renderer {
 
     this.buttons.push(battleRect, mergeRect, drawRect, gainRect);
 
+    // 双人合作守关入口（灰度开关 CONFIG.coop.enabled；enabled=false 时不渲染，避免死按钮）
+    this.coopBtnRect = null;
+    if (CONFIG.coop && CONFIG.coop.enabled) {
+      const coh = 34, cow = 116;
+      const cox = battleRect.x;
+      const coy = L.actionY - coh - 8;
+      this.drawButton(cox, coy, cow, coh, '双人·合作', '#7e57c2');
+      const coord = { x: cox, y: coy, w: cow, h: coh, action: 'coop' };
+      this.buttons.push(coord);
+      this.coopBtnRect = coord;
+    }
+
     // 临近保底提示：仅剩 1~2 抽时才在抽卡按钮内中下部显示金色小字，平时不显示（减少信息噪音）
     if (this.game.energy >= 8) {
       const pe = this.game.pityEpic || 0, pl = this.game.pityLegend || 0;

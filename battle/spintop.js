@@ -243,6 +243,10 @@ class SpintopBattle {
     this.phase = 'idle'; // idle | playing | result
     this.result = null;  // win | lose
     this.reward = 0;
+    // 双人合作守关（同屏交替传机）：持方 + 贡献统计（仅战绩不发资源）
+    this.coop = false;
+    this.coopActive = 'A';           // 当前持方 A/B
+    this.coopContrib = { A: 0, B: 0 }; // 各自贡献得分（结算展示占比用）
     this.dropItem = null;
     this.arenaGained = 0;   // 本局获得的竞技积分（结算后展示用）
     this.playerBb = null;
@@ -546,6 +550,14 @@ class SpintopBattle {
       this.targetScore = Math.floor(this.targetScore * 1.6);   // BOSS 更厚血（目标分更高）
       if (this.enemy) this.enemy.maxSpeed *= 1.15;             // BOSS 基础更快
     }
+    // 双人合作守关：重置持方/贡献，并额外强化 BOSS（合作关更强，但只记战绩不发资源）
+    this.coop = !!(run && run.coop);
+    this.coopContrib = { A: 0, B: 0 };
+    this.coopActive = 'A';
+    if (this.coop && this.targetScore > 0) {
+      this.targetScore = Math.floor(this.targetScore * COOP_BOSS_MULT);
+      if (this.enemy) this.enemy.maxSpeed *= (1 + (COOP_BOSS_MULT - 1) * 0.1);
+    }
     this.floatingTexts.length = 0;
     this.trailPoints.length = 0;
     this._trailPool.length = 0;
@@ -572,6 +584,12 @@ class SpintopBattle {
     this._countGoPlayed = false;
     if (this.audio) this.audio.play('countdown');
     return true;
+  }
+
+  /** 双人合作·传给好友：切换当前持方（仅影响 HUD 与贡献统计，物理不变）。返回新持方。 */
+  passPhone() {
+    this.coopActive = (this.coopActive === 'A') ? 'B' : 'A';
+    return this.coopActive;
   }
 
   whipStart(x, y) {
@@ -682,6 +700,7 @@ class SpintopBattle {
     earnedScore = Math.floor(earnedScore * this.scoreMultiplier * this._scoreMult * elemMult * critMult);
 
     this.score += earnedScore;
+    if (this.coop) this.coopContrib[this.coopActive] += earnedScore;
     this.screenShake = Math.min(SHAKE_MAX, fEff * 0.6);
 
     // #7 打击感·命中火光（非形变）：暖色火光（暖白核心→橙红），半径更小更聚焦、亮度设上限，
@@ -893,13 +912,14 @@ class SpintopBattle {
     const win = (force === 'win') || (force !== 'lose' && this.score >= this.targetScore);
     if (win) {
       this.result = 'win';
-      // 批次E·连战胜利 → 弹出三选一 buff（免费叠层继续下一关）
-      if (this.runActive) {
+      if (this.coop) this.reward = 0;   // 合作只记战绩，不发金币/连胜/段位
+      // 批次E·连战胜利 → 弹出三选一 buff（免费叠层继续下一关）。合作关不属于连战，跳过。
+      if (!this.coop && this.runActive) {
         this._pendingRun = true;
         this._rollRunBuffChoices();
         if (this.game) this.game.runBuffOpen = true;
       }
-      if (this.game && typeof this.game.winStreak === 'number') this.game.winStreak += 1;
+      if (!this.coop && this.game && typeof this.game.winStreak === 'number') this.game.winStreak += 1;
       // 连胜倍率（play-design v1）：金币奖励 × 1x/2x/3x/5x（断连归零）
       const mult = (this.game && typeof this.game.streakMultiplier === 'function') ? this.game.streakMultiplier() : 1;
       // 限时活动（play-design v1）：周末双倍金币
@@ -915,14 +935,14 @@ class SpintopBattle {
       const powerPart = Math.floor(this.power * 0.5);
       this.reward = Math.floor((scorePart + powerPart + 20) * this._coinMult);
       if (this.isRingOut) this.reward = Math.floor(this.reward * 1.25) + 40; // 出界制胜额外奖励
-      this.game.coins += this.reward;
+      if (!this.coop && this.game) this.game.coins += this.reward;
       // 大师等级：对战胜利 +50 经验
-      if (this.game && typeof this.game.addExp === 'function') this.game.addExp(50);
+      if (!this.coop && this.game && typeof this.game.addExp === 'function') this.game.addExp(50);
       // 竞技场天梯：胜利按得分折算竞技积分（周赛）
-      if (this.game && typeof this.game.addArenaScore === 'function') {
+      if (!this.coop && this.game && typeof this.game.addArenaScore === 'function') {
         this.arenaGained = this.game.addArenaScore(this.score);
       }
-      if (Math.random() < 0.35) {
+      if (!this.coop && Math.random() < 0.35) {
         this.dropItem = randomBeyblade();
         if (this.game.inventory.length < 400) {
           this.game.inventory.push(this.dropItem);
@@ -933,10 +953,14 @@ class SpintopBattle {
       }
       // 批次D·对战掉落宝箱（play-design v1）：胜利 30% 概率掉「竞技宝箱」，高连击提升品质
       this.chestDropped = null;
-      if (Math.random() < 0.3) {
+      if (!this.coop && Math.random() < 0.3) {
         const q = this.maxCombo >= 15 ? 2 : (this.maxCombo >= 8 ? 1 : 0); // 高连击 → 高品质
         this.chestDropped = { quality: q };
         if (this.game && typeof this.game.dropBattleChest === 'function') this.game.dropBattleChest(q);
+      }
+      // 双人合作胜利：只记战绩（不发资源）
+      if (this.coop && this.game && typeof this.game.recordCoopWin === 'function') {
+        try { this.game.recordCoopWin(this.runStage); } catch (e) {}
       }
       // 胜负结算后立即存档（绕过 2s 节流）
       if (this.game && typeof this.game.save === 'function') {
@@ -950,8 +974,8 @@ class SpintopBattle {
       this.runActive = false;
       if (this.game) this.game.runBuffOpen = false;
       // 失败惩罚：门票 20 已扣不退，此处再扣 LOSE_ENERGY_PENALTY（唯一真值来源，见文件头）
-      this.game.energy = Math.max(0, this.game.energy - LOSE_ENERGY_PENALTY);
-      if (this.game && typeof this.game.winStreak === 'number') this.game.winStreak = 0;
+      if (!this.coop) this.game.energy = Math.max(0, this.game.energy - LOSE_ENERGY_PENALTY);
+      if (!this.coop && this.game && typeof this.game.winStreak === 'number') this.game.winStreak = 0;
       // 败也存档
       if (this.game && typeof this.game.save === 'function') {
         this.game.lastSave = 0;
@@ -1749,6 +1773,23 @@ class SpintopBattle {
       ctx.restore();
 
       buttons.push({ x: backX, y: backY, w: backW, h: backH, action: 'battle_back' });
+      if (this.coop) {
+        // 双人合作：传给好友按钮（返回右侧）+ 当前持方指示
+        const cbW = 94, cbH = 34, cbX = backX + backW + 10, cbY = backY;
+        const cbCx = cbX + cbW / 2, cbCy = cbY + cbH / 2;
+        ctx.save();
+        if (!this._fxLow) { ctx.shadowColor = '#7e57c2'; ctx.shadowBlur = 8; }
+        roundRectPath(ctx, cbX, cbY, cbW, cbH, cbH / 2); ctx.fillStyle = 'rgba(126,87,194,0.92)'; ctx.fill();
+        ctx.strokeStyle = 'rgba(255,255,255,0.35)'; ctx.lineWidth = 1; ctx.stroke();
+        ctx.fillStyle = '#ffffff'; ctx.font = 'bold 13px sans-serif'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+        ctx.fillText('传给好友', cbCx, cbCy + 0.5);
+        ctx.shadowBlur = 0;
+        ctx.restore();
+        ctx.fillStyle = 'rgba(255,255,255,0.85)'; ctx.font = '12px sans-serif'; ctx.textAlign = 'right';
+        ctx.fillText('持方 ' + this.coopActive, this.width - 14, cbCy);
+        ctx.textAlign = 'center';
+        buttons.push({ x: cbX, y: cbY, w: cbW, h: cbH, action: 'coop_pass' });
+      }
     }
     if (this.phase === 'playing') this._drawHudFrame(ctx);
     if (this.phase === 'playing' && this.whipCount < 2) this._drawTutorialHint(ctx);
@@ -3197,7 +3238,20 @@ class SpintopBattle {
 
     // ---- 奖励胶囊行 ----
     const chipTop = cursor;
-    if (isWin) {
+    if (isWin && this.coop) {
+      // 双人合作战绩胶囊：贡献占比（无金币/连胜胶囊，只记战绩）
+      const _a = this.coopContrib.A || 0, _b = this.coopContrib.B || 0;
+      const _tot = (_a + _b) || 1;
+      const _ap = Math.round(_a / _tot * 100);
+      const _chW = 268, _chH = 28, _chX = cx - _chW / 2, _chTop = chipTop;
+      ctx.fillStyle = 'rgba(255,255,255,0.1)';
+      roundRectPath(ctx, _chX, _chTop, _chW, _chH, _chH / 2); ctx.fill();
+      ctx.strokeStyle = 'rgba(255,255,255,0.22)'; ctx.lineWidth = 1;
+      roundRectPath(ctx, _chX + 0.5, _chTop + 0.5, _chW - 1, _chH - 1, _chH / 2 - 0.5); ctx.stroke();
+      ctx.fillStyle = '#ffd54f'; ctx.font = 'bold 13px sans-serif'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+      ctx.fillText('你和好友合力 · 贡献 A ' + _ap + '% / B ' + (100 - _ap) + '%', cx, _chTop + _chH / 2);
+      ctx.textAlign = 'center';
+    } else if (isWin) {
       const chips = [
         { icon: 'coin', txt: '+' + formatNumber0(this.reward) },
         { icon: 'double', txt: '连胜 ×' + streak + '  ×' + mult + '倍' }
@@ -3333,7 +3387,18 @@ class SpintopBattle {
     const btnY = cursor;
     const btnAppear = clamp01((t - 1.0) / 0.35);
     const btnSpring = 0.6 + 0.4 * easeOutBack(btnAppear);
-    if (isWin) {
+    if (isWin && this.coop) {
+      const btnW3 = 90, gap3 = 10;
+      const cTotal = btnW3 * 3 + gap3 * 2;
+      const cx0 = cx - cTotal / 2;
+      const share  = { x: cx0, y: btnY, w: btnW3, h: BTN_H, action: 'battle_share_coop' };
+      const again  = { x: cx0 + btnW3 + gap3, y: btnY, w: btnW3, h: BTN_H, action: 'battle_again' };
+      const back   = { x: cx0 + (btnW3 + gap3) * 2, y: btnY, w: btnW3, h: BTN_H, action: 'battle_back' };
+      this._drawButton(ctx, share.x, share.y, share.w, share.h, '邀约', '#29b6f6', { spring: btnSpring, glow: 0.5, action: 'battle_share_coop' });
+      this._drawButton(ctx, again.x, again.y, again.w, again.h, '再战', '#e53935', { spring: btnSpring, glow: 0.85, action: 'battle_again' });
+      this._drawButton(ctx, back.x,  back.y,  back.w,  back.h,  '返回', '#7e57c2', { spring: btnSpring, glow: 0.4, action: 'battle_back' });
+      buttons.push(share, again, back);
+    } else if (isWin) {
       const btnW3 = 90, gap3 = 10;
       const total3 = btnW3 * 3 + gap3 * 2;
       const x0 = cx - total3 / 2;
@@ -3366,6 +3431,8 @@ class SpintopBattle {
 }
 
 // 批次E·连战 run buff 池（每胜随机抽 3 张，可叠层累积）
+const COOP_BOSS_MULT = 2;   // 双人合作关 BOSS 目标分放大倍率
+
 const RUN_BUFFS = [
   { id: 'torque', label: '速', color: '#ffb300', name: '转速强化', desc: '陀螺最大转速 +12%', icon: 'spin' },
   { id: 'score',  label: '分', color: '#ef5350', name: '得分狂热', desc: '得分获取 +20%', icon: 'coin' },
@@ -3379,6 +3446,7 @@ const RUN_BUFFS = [
 
 module.exports = {
   SpintopBattle, POWERUPS, RUN_BUFFS, LOSE_ENERGY_PENALTY,
+  COOP_BOSS_MULT,
   WHIP_DIST_FULL, WHIP_DIST_MIN, WHIP_DIST_MAX, IMPULSE_CAP, SHAKE_MAX, FORCE_CAP_MULT,
   HITSTOP_COLLISION, HITSTOP_CRIT, CRIT_MULT, TARGET_REF_MULT,
   HITSTOP_MIN_IMPACT, HITSTOP_COLLISION_CD, PARTICLE_ALPHA_STEPS

@@ -109,6 +109,15 @@ const CONFIG = {
     daily:   't7eOtI7N4xfKWMXditAif1pSd0GHE6xAUiDkMEBiO-k', // 每日登录提醒（MP 后台申请的 templateId，已填 → 订阅生效）
     energy:  'd1rxqpkdmCq03l1yvSX4QHWif93dLFJ-MEuPf2-6CNw', // 体力恢复提醒（MP 后台申请的 templateId，已填 → 订阅生效）
     offline: 'eSUW_kfbp_4X2xYMiQBycjlve786bkkdvodtu-yo4NA'  // 离线收益领取提醒（MP 后台申请的 templateId，已填 → 订阅生效）
+  },
+
+  // 双人合作守关（纯客户端·同屏交替传机）：零后端「一起玩」裂变。
+  // enabled=false 时主页「双人」入口不渲染（无死按钮），灰度验证玩法价值后再开。
+  coop: {
+    enabled: false,
+    bossMult: 2,                 // BOSS 目标分放大倍率（合作关更强）
+    minStage: 1,                 // 合作关起步关卡（挂 run.stage 传）
+    shareTitle: '我和好友双人合力通关了陀螺大师第{stage}关！敢来和我们一起吗？'
   }
 };
 

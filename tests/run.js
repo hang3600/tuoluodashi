@@ -46,6 +46,7 @@ const SUITES = [
   { file: 'smoke_hitfeel_v2.js', desc: '#7 打击感升级：硬碰硬·无形变（白闪+震屏承担） + 拖尾辉光 + 音效分层(轻/重/暴击/碰撞)' },
   { file: 'smoke_ultimate.js', desc: '#8 怒气必杀：怒气积累(命中/撞击/打偏不攒/封顶) + 满怒必杀按钮 + 释放演出+得分爆发 + HUD 怒气条' },
   { file: 'smoke_level_boss.js', desc: '#9 关卡/BOSS 化：每5关BOSS + 二阶段狂暴(分数过半×1.25) + 敌血条=目标分映射 + 第N关/对手名 HUD' },
+  { file: 'smoke_coop.js', desc: '双人合作守关：同屏交替传机·只记战绩不发资源 + BOSS强化 + passPhone + 纯邀约分享(非诱导) + 灰度门控' },
   { file: 'smoke_battle_frame.js', desc: '对战页 HUD 框（电影感游戏界面）：烘焙+缓存 + 低能量危机暗角不崩' },
   { file: 'smoke_chest_open.js', desc: '青铜宝箱「开启」门控：首次免费/之后看广告 + 跨天复用 + 降级兜底' },
   { file: 'smoke_topimg_load.js', desc: '陀螺/角标 PNG 加载 v8（对齐 spintop：单次赋 src + 不再调 wx.loadImage + 6s 换路兜底 + 金/木/水/火/土 level 专属贴图）' },

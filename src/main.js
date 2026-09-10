@@ -528,6 +528,11 @@ class Main {
               }
             } else if (a === 'battle_quick') {
               this._quickBattle();
+            } else if (a === 'coop') {
+              // 双人合作守关（同屏交替传机·纯客户端）：只记战绩不发资源
+              this._startCoop();
+            } else if (a === 'coop_pass') {
+              this._startCoopPass();
             } else if (a === 'buff') {
               // 局前增益面板入口（与「对战」直接开战互补的独立按钮）
               const bb = this.game.selectBattleBeyblade();
@@ -577,6 +582,9 @@ class Main {
               this.game.runBuffOpen = false;
             } else if (a === 'battle_share') {
               this._shareResult();
+            } else if (a === 'battle_share_coop') {
+              // 双人合作·邀约分享（纯邀请、无奖励，非诱导分享）
+              this._shareResultCoop();
             } else if (a === 'battle_back') { this.game.runBuffOpen = false; this._endBattle(); this.game.mode = 'main'; }
             else if (a === 'club_enter') { this.game.closeClubGuide(); this._openGameClub(); }
             else if (a === 'club_guide_close') { this.game.closeClubGuide(); }
@@ -1196,6 +1204,47 @@ class Main {
     this.game.mode = 'battle';
     this.audio.play('clash');
     if (typeof this.game.save === 'function') { try { this.game.save(); } catch (e) {} }
+  }
+
+  // 双人合作守关入口：复用 _quickBattle 的门禁（有陀螺 / 20 能量门票），带 coop 标记开合作关。
+  // 结算只记战绩不发资源（见 spintop _settle coop 闸门）。
+  _startCoop() {
+    if (!(CONFIG.coop && CONFIG.coop.enabled)) return;
+    const bb = this.game.selectBattleBeyblade();
+    if (!bb) { this._toast('先抽卡或合成一个陀螺'); return; }
+    if (this.game.energy < 20) { this._toast('能量不足，无法开战'); return; }   // 门票 20 能量（真实参与感，结算不发资源）
+    this.game.energy -= 20;
+    this.game.buffOpen = false;
+    this.lastBattleBb = bb;
+    this._chestShown = false;
+    const stage = (CONFIG.coop && CONFIG.coop.minStage) || 1;
+    this._startBattle(bb, null, { active: true, stage: stage, coop: true });
+    this.game.mode = 'battle';
+    this.audio.play('clash');
+    if (typeof this.game.save === 'function') { try { this.game.save(); } catch (e) {} }
+  }
+
+  // 双人合作·传给好友（切换持方，仅影响 HUD/贡献统计）
+  _startCoopPass() {
+    const b = this.game.battle;
+    if (b && typeof b.passPhone === 'function') {
+      const who = b.passPhone();
+      this.audio.play('click');
+      this._toast('已传给好友 · 当前持方 ' + who);
+    }
+  }
+
+  // 双人合作·邀约分享（纯邀请、无奖励，非诱导分享，合规）
+  _shareResultCoop() {
+    const b = this.game.battle;
+    const stage = ((b && b.runStage) || (CONFIG.coop && CONFIG.coop.minStage) || 1);
+    const tpl = (CONFIG.coop && CONFIG.coop.shareTitle) || '我和好友双人合力通关了陀螺大师第{stage}关！敢来和我们一起吗？';
+    const title = tpl.replace('{stage}', stage);
+    if (typeof wx !== 'undefined' && wx.shareAppMessage) {
+      wx.shareAppMessage({ title: title, query: 'from=coop', imageUrl: CONFIG.shareCardImage });
+    }
+    this.audio.play('click');
+    this._toast('已邀请好友一起玩');
   }
 
   _buffCost(buff) {
