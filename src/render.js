@@ -642,11 +642,22 @@ class Renderer {
     const W = this.width;
     const L = this.layout;
     const ty = (L && typeof L.titleY === 'number') ? L.titleY : this.height * 0.3;
+    const k = (this.game && typeof this.game.introK === 'number') ? this.game.introK : 1;   // ③3-1 首屏呼吸
+    if (k >= 1 && !this.game) { /* noop */ }
+    ctx.save();
+    const sc = this._fxLow ? 1 : (0.96 + 0.04 * (1 - Math.pow(1 - k, 3)));
+    ctx.globalAlpha = Math.min(1, 0.35 + 0.65 * k);
+    ctx.translate(W / 2, ty); ctx.scale(sc, sc); ctx.translate(-W / 2, -ty);
+    if (!this._fxLow && k < 1) {
+      ctx.fillStyle = 'rgba(149,117,205,' + (0.10 * (1 - k)).toFixed(3) + ')';
+      ctx.beginPath(); ctx.arc(W / 2, ty + 6, 130, 0, Math.PI * 2); ctx.fill();
+    }
     ctx.textAlign = 'center';
     ctx.textBaseline = 'top';
     ctx.fillStyle = 'rgba(209,196,233,0.9)';
     ctx.font = '13px ' + APPLE_FONT;
     ctx.fillText('抽陀螺 · 合成传说 · 单手对战', W / 2, ty);
+    ctx.restore();
   }
 
   /**

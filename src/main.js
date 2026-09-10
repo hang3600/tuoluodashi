@@ -230,6 +230,7 @@ class Main {
     this._rewardsThisBattle = 0;   // 本局已展示的被动激励位次数（≤gameMax），每局重置
     this._fatalCount = 0;
     this._firstFrameRendered = false;
+    this._introDone = false; this._introT = 0; this._introSounded = false;   // ③3-1 首屏呼吸感(一次性)
     this._clubGuideChecked = false; // 首帧后只检查一次游戏圈引导
 
     Rewarded.init({ adUnitId: CONFIG.adUnitId, chestAdUnitId: CONFIG.chestAdUnitId, energyAdUnitId: CONFIG.energyAdUnitId });
@@ -1402,6 +1403,14 @@ class Main {
       const now = Date.now();
       const frameDt = Math.min((now - this.lastTime) / 1000, 0.05);
       this.lastTime = now;
+      // ③3-1 开场首屏呼吸感：首屏 main 0→0.8s 标题淡入/放大/柔光 + 起音（一次性，LOW 档降级）
+      if (!this._introDone && this.game.mode === 'main') {
+        this._introT += frameDt;
+        const _ik = Math.min(1, this._introT / (UI.motion.introDur || 0.8));
+        try { this.game.introK = _ik; } catch (e) {}
+        if (!this._introSounded && _ik > 0 && this.audio) { try { this.audio.play('click'); } catch (e) {} this._introSounded = true; }
+        if (_ik >= 1) { this._introDone = true; }
+      }
 
       // 场景驱动的帧率档位切换
       const target = this._computeTargetFps();
