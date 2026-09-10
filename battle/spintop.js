@@ -3382,6 +3382,23 @@ class SpintopBattle {
       cursor += NOTE_H;                    // 24，与 totalH 预留一致
     }
 
+    // ---- 结算翻倍激励位：赢一局"看广告金币翻倍"（文章验证最优位，纯游戏内激励非诱导）----
+    if (isWin && !this.coop && this.doubleAvailable) {
+      const dpH = 40, dpGap = 14;
+      const dpY = cursor; cursor += dpH + dpGap;
+      const dpW = 250, dpX = cx - dpW / 2;
+      ctx.save(); ctx.shadowColor = '#ffb300'; ctx.shadowBlur = 10;
+      roundRectPath(ctx, dpX, dpY, dpW, dpH, dpH / 2); ctx.fillStyle = 'rgba(255,179,0,0.16)'; ctx.fill();
+      ctx.strokeStyle = 'rgba(255,183,77,0.6)'; ctx.lineWidth = 1; roundRectPath(ctx, dpX + 0.5, dpY + 0.5, dpW - 1, dpH - 1, dpH / 2 - 0.5); ctx.stroke();
+      ctx.shadowBlur = 0;
+      ctx.fillStyle = '#ffcc80'; ctx.font = 'bold 15px sans-serif'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+      ctx.fillText('看广告 金币翻倍', cx, dpY + dpH / 2 + 0.5);
+      ctx.fillStyle = 'rgba(255,224,178,0.75)'; ctx.font = '11px sans-serif';
+      ctx.fillText('基础奖励已入账 · 再看一则可翻倍', cx, dpY + dpH + 9);
+      ctx.restore();
+      buttons.push({ x: dpX, y: dpY, w: dpW, h: dpH, action: 'battle_result_double' });
+      cursor += 12;
+    }
     // ---- 按钮（CTA：外发光 + 入场 spring）----
     cursor += SPACER;
     const btnY = cursor;

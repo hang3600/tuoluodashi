@@ -74,6 +74,8 @@ class GameState {
     this.chestAdCount = 0;        // 当日看广告开箱次数
     this.boostDate = '';          // 助力日期（每日重置）
     this.boostCount = 0;          // 当日已领助力次数（上限 5 次）
+    this.resultDoubleDate = '';   // 结算翻倍日期（跨天归零）
+    this.resultDoubleCount = 0;   // 当日已看「胜利翻倍」次数
     this.friendHigh = 8000;       // 好友最高分（本地模拟挑战目标）
     this.battleChestOpen = false; // 竞技宝箱弹窗开关（纯 UI）
     this.battleChestT = 0;        // 宝箱弹窗入场动画计时（纯 UI）
@@ -1036,6 +1038,8 @@ class GameState {
         drawsSinceAd: this.drawsSinceAd,
         interAdDate: this.interAdDate,
         interAdCount: this.interAdCount,
+        resultDoubleDate: this.resultDoubleDate,
+        resultDoubleCount: this.resultDoubleCount,
         interAdBroken: this.interAdBroken,
         signDate: this.signDate,
         signDay: this.signDay,
@@ -1078,6 +1082,7 @@ class GameState {
       this.winStreak, this.pityEpic, this.pityLegend, this.tutorialDone ? 1 : 0, this.tutorialStep,       this.adEnergyDate,
       this.obDone ? 1 : 0, this.obTries,
       this.adEnergyCount, this.drawsSinceAd, this.interAdDate, this.interAdCount, this.interAdBroken ? 1 : 0,
+      this.resultDoubleDate, this.resultDoubleCount,
       this.signDate, this.signDay, this.signClaimed ? 1 : 0,
       this.signStreak, this.signMakeupDate, this.lastSeen, this.offlineRewardDate,
       this.mergeCount, this.hiddenDrops, (this.battleChest ? (this.battleChest.quality + '|' + this.battleChest.count) : ''),
@@ -1095,6 +1100,13 @@ class GameState {
     this.coopWins++;
     this.coopStage = Math.max(this.coopStage, Number(stage) || 1);
   }
+
+  /** 结算翻倍：当日已看次数（跨天归零）。每日上限由 main 对照 CONFIG.resultDoublePerDay。 */
+  resultDoubleCountToday() {
+    if (this.resultDoubleDate !== this._todayKey()) { this.resultDoubleDate = this._todayKey(); this.resultDoubleCount = 0; }
+    return this.resultDoubleCount;
+  }
+  markResultDouble() { this.resultDoubleCountToday(); this.resultDoubleCount++; }
 
   load() {
     if (typeof wx === 'undefined' || !wx.getStorageSync) return;
@@ -1168,6 +1180,8 @@ class GameState {
       this.drawsSinceAd = Math.max(0, Number(data.drawsSinceAd) || 0);
       this.interAdDate = typeof data.interAdDate === 'string' ? data.interAdDate : '';
       this.interAdCount = Math.max(0, Number(data.interAdCount) || 0);
+      this.resultDoubleDate = typeof data.resultDoubleDate === 'string' ? data.resultDoubleDate : '';
+      this.resultDoubleCount = Math.max(0, Number(data.resultDoubleCount) || 0);
       this.interAdBroken = !!data.interAdBroken;
       this.signDate = typeof data.signDate === 'string' ? data.signDate : '';
       this.signDay = Math.max(0, Math.min(14, Number(data.signDay) || 0));
@@ -1258,6 +1272,8 @@ class GameState {
       // v2新增：双人合作战绩（纯战绩，可选字段，无则不存默认 0）
       if (typeof migrated.coopStage !== 'number') migrated.coopStage = 0;
       if (typeof migrated.coopWins !== 'number') migrated.coopWins = 0;
+      if (typeof migrated.resultDoubleDate !== 'string') migrated.resultDoubleDate = '';
+      if (typeof migrated.resultDoubleCount !== 'number') migrated.resultDoubleCount = 0;
       if (typeof migrated._shareEntryClaimed !== 'boolean') migrated._shareEntryClaimed = false;
       // v2新增：经验和等级系统
       if (typeof migrated.exp !== 'number') migrated.exp = 0;

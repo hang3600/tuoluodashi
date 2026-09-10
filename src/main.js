@@ -225,6 +225,8 @@ class Main {
     this._renderedThisFrame = false; // 本帧是否实际渲染（FPS 监控采样标记）
     this.lastBattleBb = null;
     this._adBusy = false;
+    this._lastRewardedAd = 0;      // 上次被动激励位时间戳（ms），用于 ≥gapMin 间隔
+    this._rewardsThisBattle = 0;   // 本局已展示的被动激励位次数（≤gameMax），每局重置
     this._fatalCount = 0;
     this._firstFrameRendered = false;
     this._clubGuideChecked = false; // 首帧后只检查一次游戏圈引导
@@ -585,6 +587,9 @@ class Main {
             } else if (a === 'battle_share_coop') {
               // 双人合作·邀约分享（纯邀请、无奖励，非诱导分享）
               this._shareResultCoop();
+            } else if (a === 'battle_result_double') {
+              // 胜利结算翻倍（文章验证最优激励位）：看广告金币翻倍
+              this._watchResultDouble();
             } else if (a === 'battle_back') { this.game.runBuffOpen = false; this._endBattle(); this.game.mode = 'main'; }
             else if (a === 'club_enter') { this.game.closeClubGuide(); this._openGameClub(); }
             else if (a === 'club_guide_close') { this.game.closeClubGuide(); }
@@ -628,6 +633,7 @@ class Main {
               } else {
                 // 非首次：必须先看广告（看完广告后才开箱）。广告不可用则降级免费开，防卡死。
                 if (this._adBusy) return;
+                if (!this._adFreqGate()) { this._toast('广告冷却中，稍后再看'); return; }
                 this._adBusy = true;
                 Rewarded.show({
                   adUnitId: CONFIG.chestAdUnitId,
@@ -765,6 +771,7 @@ class Main {
               });
             } else if (a === 'battle_revive') {
               if (this._adBusy) return;
+              if (!this._adFreqGate()) { this._toast('广告冷却中，稍后再看'); return; }
               this._adBusy = true;
               Rewarded.show({
                 onReward: () => { if (this.lastBattleBb) { this._startBattle(this.lastBattleBb); this.audio.play('clash'); } },
@@ -1122,6 +1129,7 @@ class Main {
     const unitMap = { draw3: CONFIG.drawAdUnitId3, draw6: CONFIG.drawAdUnitId6, draw9: CONFIG.drawAdUnitId9, rand2: CONFIG.drawAdUnitIdRand };
     const unit = unitMap[adKey];
     if (!unit) return;
+    if (!this._adFreqGate()) return;   // 被动自动插播：频控不过则静默跳过（不打扰）
     Rewarded.show({
       adUnitId: unit,
       onReward: () => {}, // 看完：纯曝光，不额外发奖（等同原隐藏插屏）
@@ -1146,6 +1154,7 @@ class Main {
           bb.safeBottom = this.safeBottom;
           bb.perfLevel = this.game.perfLevel;
           if (typeof bb._applyPerfLevel === 'function') bb._applyPerfLevel();
+          bb.doubleAvailable = !!CONFIG.resultDoubleAdUnitId;   // 结算翻倍入口：无广告位则不下发
           this.game.battle = bb;
           this._battleLoading = null;
           resolve(bb);
@@ -1166,6 +1175,8 @@ class Main {
 
   // 统一入口：确保对战模块就绪后再 start（首次有子包下载延迟，属正常按需加载）
   _startBattle(bb, buff, opts) {
+    this._resultDoubled = false;   // 结算翻倍：每局重置（同局只能翻一次）
+    this._rewardsThisBattle = 0;   // 频控：本局已弹的被动激励位清零
     this._ensureBattle()
       .then((b) => { b.start(bb, buff || null, opts || undefined); })
       .catch((e) => {
@@ -1245,6 +1256,51 @@ class Main {
     }
     this.audio.play('click');
     this._toast('已邀请好友一起玩');
+  }
+
+  // 胜利结算翻倍：赢一局后"看广告金币翻倍"（基础已入账，看后多给 reward → 总 ×2）。
+  // 含每日上限 + 同局一次 + 广告位缺失降级，均不伤害已到账的基础奖励。
+  _watchResultDouble() {
+    const b = this.game.battle;
+    if (!b || b.coop || b.result !== 'win') return;
+    if (!CONFIG.resultDoubleAdUnitId) { this._toast('翻倍暂未开通'); return; }
+    if (this._resultDoubled) { this._toast('本局已翻倍'); return; }
+    if (typeof this.game.resultDoubleCountToday === 'function' &&
+        this.game.resultDoubleCountToday() >= (CONFIG.resultDoublePerDay || 3)) { this._toast('今日翻倍次数已用完'); return; }
+    if (this._adBusy) return;
+    if (!this._adFreqGate()) { this._toast('广告冷却中，稍后再看'); return; }
+    this._adBusy = true;
+    Rewarded.show({
+      adUnitId: CONFIG.resultDoubleAdUnitId,
+      onReward: () => {
+        this._adBusy = false;
+        this._resultDoubled = true;
+        if (this.game && typeof this.game.markResultDouble === 'function') this.game.markResultDouble();
+        const extra = (b && b.reward) || 0;
+        if (this.game) this.game.coins += extra;
+        this.audio.play('win');
+        if (this.renderer && typeof this.renderer.addFloatText === 'function') {
+          this.renderer.addFloatText(this.cw / 2, this.ch * 0.4, '金币翻倍 +' + extra, '#ffd54f');
+        }
+        this._toast('获得翻倍金币 +' + extra);
+        if (typeof this.game.save === 'function') { try { this.game.save(); } catch (e) {} }
+      },
+      onFail: () => {
+        this._adBusy = false;
+        this._toast('广告暂不可用，金币未翻倍（基础奖励已保留）');
+      }
+    });
+  }
+
+  /** 广告频控（被动激励位）：一局 ≤ gameMax 次、且距上次 ≥ gapMin 分钟。
+   *  通过则本次占位（返回 true），不通过返回 false。主动位（能量）不走此门。 */
+  _adFreqGate() {
+    const cfg = CONFIG.adFreq || { gameMax: 2, gapMin: 3 };
+    if (Date.now() - this._lastRewardedAd < (cfg.gapMin || 3) * 60000) return false;
+    if (this._rewardsThisBattle >= (cfg.gameMax || 2)) return false;
+    this._lastRewardedAd = Date.now();
+    this._rewardsThisBattle += 1;
+    return true;
   }
 
   _buffCost(buff) {

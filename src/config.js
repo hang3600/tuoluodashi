@@ -39,6 +39,15 @@ const CONFIG = {
   drawAdUnitId9: 'adunit-b87930618c41419e',
   drawAdUnitIdRand: 'adunit-af96563df3ed4e15',
 
+  // 结算页「胜利翻倍」激励位（文章验证 eCPM 最高、最不伤留存的广告位）：赢一局后"看广告金币翻倍"。
+  // 留空 = 结算页不渲染「翻倍」按钮（无死按钮），配好即生效。
+  resultDoubleAdUnitId: '',
+  resultDoublePerDay: 3,     // 每日可「翻倍」次数上限（管住手，避免刷屏）
+
+  // 广告频控纪律（文章铁律3）：被动激励位一局最多 gameMax 次、且距上次广告至少 gapMin 分钟；
+  // 主动位（看广告得能量）不受此限。降免受打扰、保护耐心。
+  adFreq: { gameMax: 2, gapMin: 3 },
+
   // 游戏圈 openlink：必须是短 token（形如 xxxxxxx-xxxxxx），不是浏览器 URL。
   // 唯一正确取法：登录 mp.weixin.qq.com → 游戏能力地图 → 游戏圈 → 基础设置 / 帖子·话题列表，
   // 复制那里的 openlink 原文覆盖此处。
