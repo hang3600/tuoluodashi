@@ -2349,6 +2349,21 @@ class SpintopBattle {
       if (wobble !== 0) { ctx.rotate(wobble); ctx.translate(0, wobble * 5); }
       ctx.drawImage(sprite, -r, -r, r * 2, r * 2);
       this._drawTopSweep(ctx, r, speed);
+      // 大师限定·盘面（全图鉴终局奖品）：金虹细缘 + 轻呼吸光圈
+      if (this.game && this.game._masterSkin) {
+        const _b = 0.5 + 0.5 * Math.sin((Date.now() % 1600) / 1600 * Math.PI * 2);
+        ctx.save();
+        ctx.globalCompositeOperation = 'lighten';
+        ctx.strokeStyle = 'rgba(255,214,130,' + (0.45 + 0.25 * _b) + ')';
+        ctx.lineWidth = Math.max(1.5, r * 0.05);
+        ctx.beginPath(); ctx.arc(0, 0, r * 0.98, 0, Math.PI * 2); ctx.stroke();
+        if (!this._fxLow) {   // LOW 档只留细缘，不画外光圈（省）
+          ctx.strokeStyle = 'rgba(255,210,120,' + (0.25 * _b) + ')';
+          ctx.lineWidth = Math.max(3, r * 0.10);
+          ctx.beginPath(); ctx.arc(0, 0, r * 1.08, 0, Math.PI * 2); ctx.stroke();
+        }
+        ctx.restore();
+      }
       ctx.restore();
       return;
     }

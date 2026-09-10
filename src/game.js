@@ -1030,6 +1030,7 @@ class GameState {
         exp: this.exp,
         level: this.level,
         codexClaimed: this.codexClaimed,
+        _masterSkin: this._masterSkin ? 1 : 0,
         tutorialDone: this.tutorialDone,
         tutorialStep: this.tutorialStep,
         obDone: this.obDone ? 1 : 0,
@@ -1092,7 +1093,7 @@ class GameState {
       this._shareEntryClaimed ? 1 : 0,
       this.dailyDate, (this.dailyTasks || [0, 0, 0]).join('.'), this.dailyActive, this.dailyChestClaimed ? 1 : 0,
       this.arenaPts, this.arenaWeek, this.arenaBest, this.arenaClaimedWeek,
-      this.exp, this.level, this.codexClaimed,
+      this.exp, this.level, this.codexClaimed, this._masterSkin ? 1 : 0,
       this.coopStage, this.coopWins,
       col.join(',')].join('|');
   }
@@ -1171,6 +1172,7 @@ class GameState {
       this.exp = Math.max(0, Number(data.exp) || 0);
       this.level = Math.max(1, Math.min(50, Number(data.level) || 1));
       this.codexClaimed = [0, 5, 10, 15, 20].indexOf(Number(data.codexClaimed)) >= 0 ? Number(data.codexClaimed) : 0;
+      this._masterSkin = !!data._masterSkin;
       this.tutorialDone = true; // 新手引导已去除，强制为 true
       this.tutorialStep = 2;
       // 首程引导恢复：老档（level>1，说明早已玩过）直接视为完成，不误触发；
@@ -1282,6 +1284,7 @@ class GameState {
       if (typeof migrated.exp !== 'number') migrated.exp = 0;
       if (typeof migrated.level !== 'number') migrated.level = 1;
       if (typeof migrated.codexClaimed !== 'number') migrated.codexClaimed = 0;
+      if (typeof migrated._masterSkin !== 'boolean') migrated._masterSkin = false;
       // v2新增：竞技场系统
       if (typeof migrated.arenaPts !== 'number') migrated.arenaPts = 0;
       if (typeof migrated.arenaWeek !== 'string') migrated.arenaWeek = '';
