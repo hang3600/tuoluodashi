@@ -41,7 +41,7 @@ const CONFIG = {
 
   // 结算页「胜利翻倍」激励位（文章验证 eCPM 最高、最不伤留存的广告位）：赢一局后"看广告金币翻倍"。
   // 留空 = 结算页不渲染「翻倍」按钮（无死按钮），配好即生效。
-  resultDoubleAdUnitId: '',
+  resultDoubleAdUnitId: 'adunit-1183de0d72298c4d',  // 复用默认激励位（结算翻倍启用；留空则按钮不渲染）
   resultDoublePerDay: 3,     // 每日可「翻倍」次数上限（管住手，避免刷屏）
 
   // 广告频控纪律（文章铁律3）：被动激励位一局最多 gameMax 次、且距上次广告至少 gapMin 分钟；

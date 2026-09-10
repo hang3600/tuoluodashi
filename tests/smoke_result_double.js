@@ -33,7 +33,8 @@ function mkMain() {
 
 console.log('\n【1 config】翻倍位配置');
 {
-  ok('resultDoubleAdUnitId 默认空（未配=按钮不渲染，无死按钮）', CONFIG.resultDoubleAdUnitId === '', '=' + CONFIG.resultDoubleAdUnitId);
+  ok('resultDoubleAdUnitId 已配置为激励位（非空，结算翻倍生效）', typeof CONFIG.resultDoubleAdUnitId === 'string' && CONFIG.resultDoubleAdUnitId.length > 0, '=' + CONFIG.resultDoubleAdUnitId);
+  ok('留空则按钮隐藏的设计仍保留（源级，无死按钮）', /!CONFIG\.resultDoubleAdUnitId/.test(fs.readFileSync(path.join(SRC,'main.js'),'utf8')));
   ok('resultDoublePerDay 默认 3 次上限', CONFIG.resultDoublePerDay === 3, '=' + CONFIG.resultDoublePerDay);
 }
 
