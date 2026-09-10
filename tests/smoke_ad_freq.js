@@ -62,10 +62,11 @@ console.log('\n【5 主动位不被网关】源码级：能量位不进 _adFreqG
   // 能量位分支（adenergy）附近不应出现 _adFreqGate 拒绝
   const seg = src.slice(src.indexOf("a === 'adenergy'"), src.indexOf("a === 'adenergy'") + 400);
   ok('能量位代码段不含频控拒绝', seg.indexOf('_adFreqGate') < 0);
-  // 被动位都有网关
-  ok('复活位接频控', /else if \(a === 'battle_revive'\) \{[\s\S]*?_adFreqGate/.test(src));
-  ok('结算翻倍接频控', /resultDoubleAdUnitId,\s*\n\s*onReward/.test(src) && /_adFreqGate/.test(src));
-  ok('开箱/抽卡自动弹接入频控', /if \(!this\._adFreqGate\(\)\)/.test(src));
+  // 纠正后契约：频控只作用于「被动自动插播」；玩家主动点的按钮广告不做冷却（避免挡复活/开箱/翻倍）
+  ok('不再有任何「广告冷却中」拒绝 toast（按钮位已撤）', !/_toast\('广告冷却中，稍后再看'\)/.test(src));
+  ok('主动位·能量仍不进 _adFreqGate（豁免）', seg.indexOf('_adFreqGate') < 0);
+  ok('被动自动插播·抽卡收卡自动弹保留静默频控', /if \(!this\._adFreqGate\(\)\) return;/.test(src));
+  ok('_adFreqGate 只被被动自动插播调用（this. 调用共1处）', (src.match(/this\._adFreqGate\(\)/g) || []).length === 1);
 }
 
 console.log('\n════════════════════════════');

@@ -632,8 +632,7 @@ class Main {
                 if (!this.game.battleChest) this.game.battleChestOpen = false;
               } else {
                 // 非首次：必须先看广告（看完广告后才开箱）。广告不可用则降级免费开，防卡死。
-                if (this._adBusy) return;
-                if (!this._adFreqGate()) { this._toast('广告冷却中，稍后再看'); return; }
+                if (this._adBusy) return;   // 玩家主动点的按钮广告：不做冷却档（开箱失败另有免费降级）
                 this._adBusy = true;
                 Rewarded.show({
                   adUnitId: CONFIG.chestAdUnitId,
@@ -770,8 +769,7 @@ class Main {
                 onClose: () => { this._adBusy = false; }
               });
             } else if (a === 'battle_revive') {
-              if (this._adBusy) return;
-              if (!this._adFreqGate()) { this._toast('广告冷却中，稍后再看'); return; }
+              if (this._adBusy) return;   // 玩家主动点的按钮广告：不做冷却档（靠各自每日上限）
               this._adBusy = true;
               Rewarded.show({
                 onReward: () => { if (this.lastBattleBb) { this._startBattle(this.lastBattleBb); this.audio.play('clash'); } },
@@ -1267,8 +1265,7 @@ class Main {
     if (this._resultDoubled) { this._toast('本局已翻倍'); return; }
     if (typeof this.game.resultDoubleCountToday === 'function' &&
         this.game.resultDoubleCountToday() >= (CONFIG.resultDoublePerDay || 3)) { this._toast('今日翻倍次数已用完'); return; }
-    if (this._adBusy) return;
-    if (!this._adFreqGate()) { this._toast('广告冷却中，稍后再看'); return; }
+    if (this._adBusy) return;   // 玩家主动点的按钮广告：不做冷却档（靠每日上限）
     this._adBusy = true;
     Rewarded.show({
       adUnitId: CONFIG.resultDoubleAdUnitId,
