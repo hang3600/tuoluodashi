@@ -51,6 +51,7 @@ console.log('\n【A 盘面精修】');
   // LOW 档守卫（源级）
   ok('LOW 档早退守卫', /_drawTopSweep\(ctx, r, speed\) \{[\s\S]*?if \(this\._fxLow \|\| speed <= 2\) return/.test(src));
   ok('A2 拖尾微强化含 clamp 与 _fxLow', /Math\.min\(1, \(isCrit \? 1 :[\s\S]*?0\.08 : 0\)\)/.test(src));
+  ok('盘面·星轨：贴盘缘亮弧随盘自转（高速更亮）', /ctx\.arc\(0, 0, r \* 0\.90, -0\.5, 0\.5\)/.test(src) && /speed >= 6/.test(src));
 }
 
 console.log('\n【B 战斗氛围随局变化】');

@@ -2324,6 +2324,17 @@ class SpintopBattle {
     ctx.beginPath(); ctx.arc(hx, hy, hr, 0, Math.PI * 2);
     ctx.fillStyle = this._radial(ctx, 'sweep|' + Math.round(hr * 10) + '|' + this.top.trailColor, hx, hy, 0, hx, hy, hr, [[0, hexToRgba(this.top.trailColor, 0.55)], [1, 'rgba(0,0,0,0)']]);
     ctx.fill();
+    // ②盘面·星轨：贴盘缘一段亮弧，随盘自转成"扫过"的轨迹（Apple式克制；高速更亮）
+    if (speed >= 6) {
+      ctx.globalAlpha = Math.min(0.85, 0.25 + (speed - 6) / 40);
+      ctx.beginPath();
+      ctx.arc(0, 0, r * 0.90, -0.5, 0.5);
+      ctx.lineWidth = Math.max(1.5, r * 0.05);
+      ctx.strokeStyle = hexToRgba(this.top.trailColor, 0.9);
+      ctx.lineCap = 'round';
+      ctx.stroke();
+      ctx.globalAlpha = TOP_SWEEP_ALPHA;
+    }
     ctx.restore();
   }
 
