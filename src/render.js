@@ -2818,7 +2818,7 @@ class Renderer {
 
   drawIconButton(rect, iconType) {
     const ctx = this.ctx;
-    // 容器样式和金币模块一致：半透明黑色背景 + 浅色边框 + 大圆角，避免视觉上大小不一致
+    // 容器样式和金币模块一致：半透明背景 + 浅色边框 + 大圆角（③3-3 描边统一取 UI.icon，保证全按钮一致）
     const radius = rect.h / 2;
     const sameRect = (a, b) => a && b && Math.abs(a.x - b.x) < 0.01 && Math.abs(a.y - b.y) < 0.01 && Math.abs(a.w - b.w) < 0.01 && Math.abs(a.h - b.h) < 0.01;
     const pressed = sameRect(this.pressedBtn && this.pressedBtn.rect, rect);
@@ -2830,13 +2830,13 @@ class Renderer {
     ctx.scale(1 - pressT * 0.08, 1 - pressT * 0.08);
     ctx.translate(-cx, -cy);
     ctx.fillStyle = pressed ? 'rgba(0,0,0,0.55)' : 'rgba(0,0,0,0.38)';
-    ctx.strokeStyle = pressed ? 'rgba(255,255,255,0.4)' : 'rgba(255,255,255,0.18)';
-    ctx.lineWidth = 1;
+    ctx.strokeStyle = pressed ? 'rgba(255,255,255,0.55)' : UI.icon.stroke;   // ③3-3 统一描边（令牌）
+    ctx.lineWidth = UI.icon.weight;   // ③3-3 统一描边粗细
     this.roundRect(rect.x, rect.y, rect.w, rect.h, radius); ctx.fill(); ctx.stroke();
     const pad = Math.max(4, rect.h * 0.16);
     const is = Math.min(rect.w, rect.h) - pad * 2;
     if (!this._drawPngIcon(iconType, rect.x + rect.w / 2, rect.y + rect.h / 2, is)) {
-      drawVectorIcon(ctx, iconType, rect.x + rect.w / 2, rect.y + rect.h / 2, Math.min(rect.w, rect.h) * 0.72, '#ffffff');
+      drawVectorIcon(ctx, iconType, rect.x + rect.w / 2, rect.y + rect.h / 2, Math.min(rect.w, rect.h) * 0.72, UI.icon.glyph);
     }
     ctx.restore();
   }
