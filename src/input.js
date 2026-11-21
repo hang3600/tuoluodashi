@@ -28,8 +28,12 @@ class InputHandler {
       wx.onTouchCancel(this._handleEnd.bind(this));
     }
 
-    // 浏览器兼容：鼠标事件
-    if (typeof window !== 'undefined') {
+    // 浏览器兼容：鼠标事件。
+    // ⚠️ 必须做能力检测而非只判 window 存在：开放数据域等环境可能带 window shim，
+    // 但 canvas 上没有 addEventListener —— 直接注册会在启动期抛
+    // 「this.canvas.addEventListener is not a function」（WAGameSubContext 环境实测）。
+    if (typeof window !== 'undefined' && typeof window.addEventListener === 'function'
+        && this.canvas && typeof this.canvas.addEventListener === 'function') {
       this.canvas.addEventListener('mousedown', (e) => {
         const rect = this.canvas.getBoundingClientRect();
         const t = { identifier: 'mouse', x: e.clientX - rect.left, y: e.clientY - rect.top };

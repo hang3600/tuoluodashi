@@ -83,13 +83,19 @@ console.log('\n【1】playing 稳定帧：静态渐变零新建（原 9 个/帧�
   const m = b._gradCtxCache.get(ctx);
   ok('该 ctx 已建立独立缓存表', !!m && m.size > 0, 'size=' + (m ? m.size : 0));
 
-  // 逐个断言 9 个静态站点都真的进了缓存（防止后续改动漏接）
-  const prefixes = ['back|', 'backhl|', 'dish|', 'dishhl|', 'hp|', 'plate|', 'ragebg|', 'tuto|', 'tutohl|'];
+  // 逐个断言静态站点都真的进了缓存（防止后续改动漏接）
+  // 注：批次G（2026-09-12）战斗盘实体化重绘后，原 dish| / dishhl| 两个站点被 12 个擂台装饰站点取代
+  //     （盘沿/碗壁/碗底/微染/阵营分界/指针/徽章光晕/徽章底/VS 字/顶光/底反光/投影）。
+  const prefixes = [
+    'arenashadow|', 'arenarim|', 'arenawall|', 'arenadish|', 'arenatint|', 'arenafaction|',
+    'arenaptr|', 'arenahalo|', 'arenabadge|', 'arenavs|', 'arenahl|', 'arenabl|',
+    'back|', 'backhl|', 'hp|', 'plate|', 'ragebg|', 'tuto|', 'tutohl|',
+  ];
   const keys = m ? [...m.keys()] : [];
   for (const p of prefixes) {
     ok('静态站点已接入缓存: ' + p, keys.some(k => k.indexOf(p) === 0), 'keys=' + keys.join(','));
   }
-  ok('缓存键数 = 9（不多不少，无变动 key 误入）', keys.length === 9,
+  ok('缓存键数 = 19（12 擂台装饰 + 7 HUD；不多不少，无变动 key 误入）', keys.length === 19,
     'size=' + keys.length + ' keys=' + keys.join(','));
 }
 

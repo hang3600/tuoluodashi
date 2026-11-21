@@ -65,7 +65,10 @@ console.log('\n【5 主动位不被网关】源码级：能量位不进 _adFreqG
   // 纠正后契约：频控只作用于「被动自动插播」；玩家主动点的按钮广告不做冷却（避免挡复活/开箱/翻倍）
   ok('不再有任何「广告冷却中」拒绝 toast（按钮位已撤）', !/_toast\('广告冷却中，稍后再看'\)/.test(src));
   ok('主动位·能量仍不进 _adFreqGate（豁免）', seg.indexOf('_adFreqGate') < 0);
-  ok('被动自动插播·抽卡收卡自动弹保留静默频控', /if \(!this\._adFreqGate\(\)\) return;/.test(src));
+  // P2 广告优化（2026-11-01）：gate 拦截时 key 顺延不沉没（回写 _drawRewardKey），
+  // 频控本身仍保留——断言升级为「拦截 + 回写」双语义
+  ok('被动自动插播·频控保留且拦截时 key 顺延不沉没',
+    /if \(!this\._adFreqGate\(\)\)\s*\{[\s\S]{0,240}_drawRewardKey = adKey/.test(src));
   ok('_adFreqGate 只被被动自动插播调用（this. 调用共1处）', (src.match(/this\._adFreqGate\(\)/g) || []).length === 1);
 }
 

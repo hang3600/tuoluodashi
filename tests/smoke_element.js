@@ -114,7 +114,9 @@ console.log('\n【P1-2-e】HUD 把倍率明写出来（文案与收益一一对�
 {
   const src = fs.readFileSync(path.join(__dirname, '..', 'battle', 'spintop.js'), 'utf8');
   ok('HUD 文案拼接真实倍率', /克制 x'\s*\+\s*this\.elementMult/.test(src));
-  ok('计分处乘上 elementMult', /this\._scoreMult\s*\*\s*elemMult/.test(src));
+  // P0-3 词条乘子（_traitScoreMult）插入后放宽为「_scoreMult 与 elemMult 同处计分表达式」；
+  // 锁定的意图不变：elementMult 必须真正参与得分计算，而不是只用于 HUD 展示。
+  ok('计分处乘上 elementMult', /this\._scoreMult\s*\*(\s*\(this\._traitScoreMult\s*\|\|\s*1\)\s*)?\*\s*elemMult/.test(src));
   ok('无残留的"只用于显示"注释误导', !/elementBonus = this\.elementMult > 1 \? 60 : 0; \/\/ 克制开局 \+60 分\s*$/m.test(src) || true);
 }
 

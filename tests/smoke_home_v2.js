@@ -99,7 +99,8 @@ console.log('\n【V2 视图切换条】命中区注册 + 任务入口不丢失')
   ok('注册了 2 个视图切换命中区（合成/图鉴）', r.tabRects.length === 2, 'n=' + r.tabRects.length);
   const views = r.tabRects.map(t => t.view).sort().join(',');
   ok('切换区包含 main 与 codex', views === 'codex,main', views);
-  ok('保留了「任务」入口按钮（去标题不丢功能）', !!r.buttons.find(b => b.action === 'daily'));
+  // P2-6 福利中心（2026-10-31）：原「任务」按钮位升级为「福利」单入口（action welfare）
+  ok('保留了「福利」入口按钮（任务/签到/助力 三合一，去标题不丢功能）', !!r.buttons.find(b => b.action === 'welfare'));
   ok('save/restore 平衡', r.ctx.getDepth() === 0, 'depth=' + r.ctx.getDepth());
 }
 

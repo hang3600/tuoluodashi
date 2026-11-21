@@ -127,7 +127,8 @@ console.log('\n【5】main.js 接线存在性（源码级门禁，防回退）')
   ok('_maybePromptSubscribe 按类型分别守卫(防重复骚扰)', mainSrc.indexOf('_subscribedTypes') >= 0);
   // 首页签到按钮红点/高亮（非强制弹窗，仅提示）由 autoSignAvailable 驱动
   const renderSrc = fs.readFileSync(path.join(SRC_DIR, 'render.js'), 'utf8');
-  ok('首页签到按钮红点/高亮由 autoSignAvailable 驱动（非强制弹窗）', renderSrc.indexOf('autoSignAvailable') >= 0);
+  // P2-6 福利中心（2026-10-31）：签到按钮升级为「福利」单入口，红点由 welfareMeta().anyDue 驱动
+  ok('首页福利按钮红点由 welfareMeta 驱动（非强制弹窗）', renderSrc.indexOf('welfareMeta') >= 0 && renderSrc.indexOf('anyDue') >= 0);
 }
 
 console.log('\n【6】config 提供 subscribeTemplates 占位（MP 后台申请说明）');

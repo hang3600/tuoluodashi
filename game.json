@@ -1,6 +1,7 @@
 {
   "deviceOrientation": "portrait",
   "showStatusBar": false,
+  "openDataContext": "opencontext",
   "networkTimeout": {
     "request": 5000,
     "connectSocket": 5000,
@@ -26,6 +27,7 @@
       { "type": "file", "value": "src/imgb64.js" },
       { "type": "file", "value": "src/homebg.js" },
       { "type": "file", "value": "src/codexbg.js" },
+
       { "type": "file", "value": "battle/arenabg.js" }
     ]
   },
@@ -37,7 +39,7 @@
   ],
   "plugins": {},
   "preloadRule": {
-    "battle/": { "network": "wifi", "packages": ["battle"] }
+    "battle/": { "packages": ["battle"], "network": "all" }
   },
   "resizable": false,
   "cursor": false,

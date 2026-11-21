@@ -64,6 +64,21 @@ function checkBaseLib() {
   return true;
 }
 
+/**
+ * 是否运行在「开放数据域」（子域）环境里。
+ * getSharedCanvas 是开放数据域专属 API（主域没有），是最可靠的子域信号。
+ *
+ * 背景（2026-10-31 接入 openDataContext 后实测）：本版本 macOS DevTools 会把主域入口
+ * game.js 也放进子域环境求值 —— 子域里 wx.onTouchStart 不存在、canvas 无 addEventListener，
+ * 主游戏照常 boot 会在 InputHandler 崩溃（WAGameSubContext 栈）。主域逻辑只在主域跑：
+ * 检测到子域环境时跳过 boot，把执行权留给 opencontext/index.js。
+ */
+function inOpenDataDomain() {
+  try {
+    return typeof wx !== 'undefined' && typeof wx.getSharedCanvas === 'function';
+  } catch (e) { return false; }
+}
+
 /** 首帧渲染监控：启动 5s 内未渲染出画面 → 判定黑屏，尝试重启主循环 */
 function watchFirstFrame(game) {
   if (!game) return;
@@ -123,6 +138,12 @@ function launch(info) {
 }
 
 function boot() {
+  if (inOpenDataDomain()) {
+    // 开放数据域环境：主域入口不应在此启动（入口是 opencontext/index.js），
+    // 直接静默返回，避免在子域里创建 Main/InputHandler 崩溃。
+    console.log('[boot] open data domain detected — skip main boot');
+    return;
+  }
   if (!Main) return; // 入口模块加载失败，已提示
   if (!checkBaseLib()) return;
   let info = readSystemInfo();
@@ -301,5 +322,7 @@ function setupForceUpdate() {
   }
 }
 
-setupForceUpdate();
+if (!inOpenDataDomain()) {
+  setupForceUpdate();
+}
 boot();

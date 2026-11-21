@@ -165,6 +165,50 @@ function _getTierLevelImg(tierIndex, level) {
   return _topImgs[tierIndex];
 }
 
+// ── 源图离屏释放（2026-09-13 内存优化，代码层不碰素材）─────────────────
+// 35 张源 wx.Image 解码位图是常驻大头（~1.6MB）。它们只在 getBeybladeSprite 烘焙离屏 sprite
+// 时被消费一次；烘焙完成后 sprite（纯栅格化产物）已独立存在、不再引用源图，
+// 故源图解码内存可立即释放，仅保留最近 SOURCE_LRU_CAP 张以备重烘焙（避免滚屏/重进页时的重载闪帧）。
+// ⚠️ 释放 = 仅置空模块内 store 槽位（丢弃引用交 GC），绝不重赋 src（否则会触发重新加载、
+//    且 mock 测试下 src 计数失真、破坏 smoke_topimg_load 的 sets 断言）。
+// ⚠️ 元素角标 _elImgs 在渲染期仍被 drawElementBadge 引用（属 35 张契约），体量极小且可能复用，
+//    标记为 PINNED 常驻、永不释放。
+const SOURCE_LRU_CAP = 8;            // 单屏最多约 10~12 个相异 tier:level sprite，留余量避免重烘焙重载闪帧
+const _sourceLive = new Map();       // im → { store, key, lastAccess }：烘焙后登记，离屏释放据此定位槽位
+
+// (tierIndex, level) → 该档源图所在的 store 槽位（与 _getTierLevelImg / _startLoadOnce 同套映射）
+function _slotFor(tierIndex, level) {
+  const lvIdx = Math.min(level - 1, LEVELS.length - 1);
+  if (tierIndex === 0) return { store: _earthImgs, key: lvIdx, file: _earthLevelFiles[lvIdx], folder: 'tops' };
+  if (tierIndex === 1) return { store: _woodImgs,  key: lvIdx, file: _woodLevelFiles[lvIdx],  folder: 'tops' };
+  if (tierIndex === 2) return { store: _waterImgs, key: lvIdx, file: _waterLevelFiles[lvIdx], folder: 'tops' };
+  if (tierIndex === 3) return { store: _fireImgs,  key: lvIdx, file: _fireLevelFiles[lvIdx],  folder: 'tops' };
+  if (tierIndex === 4) return { store: _goldImgs,  key: lvIdx, file: 'gold-lv' + (lvIdx + 1) + '.png', folder: 'tops' };
+  return { store: _topImgs, key: tierIndex, file: _topFiles[tierIndex], folder: 'tops' };
+}
+
+// 释放单个源图槽位（仅弃引用，交给 GC；绝不重赋 src）
+function _releaseSlot(store, key) {
+  const im = store[key];
+  if (!im) return;
+  store[key] = null;               // 丢弃模块内引用；平台 GC 回收解码位图
+  _sourceLive.delete(im);
+}
+
+// 烘焙完成后登记 live，并按 LRU 释放超出上限的源图（保留最近 SOURCE_LRU_CAP 张）
+function _sweepSources() {
+  if (_sourceLive.size <= SOURCE_LRU_CAP) return;
+  const arr = [];
+  _sourceLive.forEach(function (rec, im) { if (rec.store[rec.key] === im) arr.push({ im: im, rec: rec }); });
+  arr.sort(function (a, b) { return a.rec.lastAccess - b.rec.lastAccess; });
+  let drop = arr.length - SOURCE_LRU_CAP;
+  for (let i = 0; i < arr.length && drop > 0; i++) {
+    _releaseSlot(arr[i].rec.store, arr[i].rec.key);
+    drop--;
+  }
+}
+
+
 function _ensureAllPngs() {
   if (_allPngOk) return;
 
@@ -251,13 +295,19 @@ function drawElementBadge(ctx, el, cx, cy, scale) {
   ctx.fillText(el.name, cx, cy);
 }
 
-// 五行品质：土(普通)→木(稀有)→水(史诗)→火(史诗+)→金(传说)
+// 五灵神兽（五方）：麒麟(中·土) → 青龙(东·木) → 玄武(北·水) → 朱雀(南·火) → 白虎(西·金)
+// 2026-09-13 改名：原「土·普通 / 木·稀有 / 水·史诗 / 火·精英 / 金·传说」——
+//   陀螺名里塞稀有度词不搭（"太普通了/稀有了"），统一换成五灵神兽名。
+//   ⚠️ 只改 name；key / color / glow / chance 与数组顺序（0→4 由弱到强）一律不动，兜底/保底/图鉴索引都依赖顺序。
+//   ⚠️ 这里是【陀螺名 / 品质档名】；元素名是另一套（金/木/水/火/土 单字，见 ELEMENTS），两套名字不许重名。
+//   ⚠️ 元素是**另一套独立轴**（金/木/水/火/土，见 ELEMENTS），与品质名（五灵神兽）不许重名；
+//      元素取值见构造函数公式，不随品质恒定（方案A：25 种「神兽×元素」组合）。
 const TIERS = [
-  { key: 'earth',   name: '土·普通', color: '#a1887f', glow: '#bcaaa4', chance: 0.40 },
-  { key: 'wood',    name: '木·稀有', color: '#66bb6a', glow: '#81c784', chance: 0.28 },
-  { key: 'water',   name: '水·史诗', color: '#42a5f5', glow: '#64b5f6', chance: 0.18 },
-  { key: 'fire',    name: '火·精英', color: '#ef5350', glow: '#ef9a9a', chance: 0.10 },
-  { key: 'metal',   name: '金·传说', color: '#ffd54f', glow: '#fff59d', chance: 0.04 }
+  { key: 'earth',   name: '麒麟', color: '#a1887f', glow: '#bcaaa4', chance: 0.40 },
+  { key: 'wood',    name: '青龙', color: '#66bb6a', glow: '#81c784', chance: 0.28 },
+  { key: 'water',   name: '玄武', color: '#42a5f5', glow: '#64b5f6', chance: 0.18 },
+  { key: 'fire',    name: '朱雀', color: '#ef5350', glow: '#ef9a9a', chance: 0.10 },
+  { key: 'metal',   name: '白虎', color: '#ffd54f', glow: '#fff59d', chance: 0.04 }
 ];
 
 const LEVELS = [
@@ -268,8 +318,18 @@ const LEVELS = [
   { level: 5, power: 280, radius: 48, spinSpeed: 5.2 }
 ];
 
-// 五行元素：金(0)→木(1)→水(2)→火(3)→土(4)
-// 五行相克：金克木、木克土、土克水、水克火、火克金
+// 五行元素（属性轴）：金(0)→木(1)→水(2)→火(3)→土(4)
+// ⚠️ 元素名【刻意只用「金/木/水/火/土」单字，不与陀螺名（五灵神兽）共用】——
+//   陀螺名（TIERS[].name = 麒麟/青龙/玄武/朱雀/白虎）是**品质档名**，元素是**每只陀螺各自的属性**，
+//   两者是独立的两个轴：一个玄武陀螺的元素可以是火。
+//   若两边同名，UI 会读成「玄武 Lv3 · 元素·朱雀」这种自相矛盾（且「白虎」是最高档神兽名，
+//   出现在低档陀螺的属性上更像 bug）。分开命名后读作「玄武 Lv3 · 元素·火」＝ 品质 + 属性，语义独立。
+//   （2026-09-13 修：上一轮改名误把元素名也换成神兽名，用户在选陀螺面板看到「玄武 · 元素·白虎」后报 bug → 回退单字。）
+// 元素取值（方案A·2026-09-13 回退）：一只陀螺的元素 = f(品质, 等级)，由下方构造函数公式算得，
+//   **不随品质恒定、也不与品质同名**。同档 5 个等级恰好各占一个元素（25 种「神兽×元素」组合），
+//   所以「麒麟 Lv2」=火麒麟、「麒麟 Lv5」=水麒麟 —— 升级过程天然产出不同元素的同神兽，
+//   既撑起收集/升级深度，也撑起 25 款皮肤的差异化生产。羁绊「同元素 ≥3」是跨品质的真收集目标。
+//   ⚠️ beats 索引与倍率（1.35 / 0.75 / 1）一分未动 —— 只改 elementIdx 的取值来源。
 const ELEMENTS = [
   { key: 'metal', name: '金', color: '#ffd54f', beats: 1 },
   { key: 'wood',  name: '木', color: '#66bb6a', beats: 4 },
@@ -278,11 +338,64 @@ const ELEMENTS = [
   { key: 'earth', name: '土', color: '#a1887f', beats: 2 }
 ];
 
+// =====================================================
+// P0-3 词条系统（2026-10-31）：金币洗词条 = 金币回流战斗的硬出口
+// 每条词条映射为战斗内一个既有参数的加成（见 spintop._applyTraits 的映射表）。
+// 规则：
+//   - 新陀螺天生 1 条随机词条；合成产物继承父母词条并集（去重、封顶 2 条）→
+//     「合成提词条数」给合成额外一个长期目标；
+//   - 老存档加载时补 1 条（见 game.load），全量玩家即时可用；
+//   - 「洗词条」花金币把现有词条重掷为同等数量的新随机词条（价格递增，见 config.trait）。
+// ⚠️ 词条只作用于玩家方（敌方不吃）；改加成数值要同步 spintop._applyTraits 与本表 desc。
+// =====================================================
+const TRAITS = [
+  { id: 'crit',   name: '暴击强化', desc: '暴击伤害 +15%',   color: '#ff5252' },
+  { id: 'combo',  name: '连击延展', desc: '连击窗口 +0.3s',  color: '#42a5f5' },
+  { id: 'rage',   name: '开局怒气', desc: '开局怒气 +25',    color: '#ffb300' },
+  { id: 'stable', name: '稳固底盘', desc: '出界线外扩 5%',   color: '#a1887f' },
+  { id: 'score',  name: '得分专精', desc: '得分 +8%',        color: '#ffd54f' },
+  { id: 'whip',   name: '强力抽打', desc: '抽打力度 +5%',    color: '#ef5350' },
+  { id: 'surge',  name: '怒气回涌', desc: '命中额外怒气 +2', color: '#b388ff' }
+];
+
+const TRAIT_MAX = 2;   // 单只陀螺词条上限（与 config.trait.maxTraits 一致，这里作兜底真源）
+
+/** 随机词条：count 条、id 互不重复。count 非法/超出池子大小时自动钳制。 */
+function rollTraits(count) {
+  let n = Math.max(0, Math.min(TRAITS.length, Math.floor(count || 0)));
+  const pool = TRAITS.slice();
+  const out = [];
+  while (n > 0 && pool.length > 0) {
+    const i = Math.floor(Math.random() * pool.length);
+    const t = pool.splice(i, 1)[0];
+    out.push({ id: t.id });
+    n--;
+  }
+  return out;
+}
+
+/** 按 id 找词条定义（非法 id 返回 null，渲染/存档清洗用） */
+function traitById(id) {
+  for (let i = 0; i < TRAITS.length; i++) if (TRAITS[i].id === id) return TRAITS[i];
+  return null;
+}
+
 /** a 对 b 的克制倍率：a 克 b=1.35，a 被 b 克=0.75，无克制=1 */
 function elementMultiplier(aIdx, bIdx) {
   if (ELEMENTS[aIdx].beats === bIdx) return 1.35;
   if (ELEMENTS[bIdx].beats === aIdx) return 0.75;
   return 1;
+}
+
+/**
+ * 品质档 → 元素索引（方案B：元素绑定品质，恒定）。
+ * 按 key 匹配而非按下标 —— 两个数组顺序是巧合（金木水火土 vs 土金木水火），
+ * 写死下标日后调顺序会静默错位，按 key 匹配则改顺序自动跟随。
+ */
+/** b 被哪个元素克制（返回元素索引，无则 -1）——UI 展示「被 X 克」用 */
+function elementBeatenBy(aIdx) {
+  for (let i = 0; i < ELEMENTS.length; i++) if (ELEMENTS[i].beats === aIdx) return i;
+  return -1;
 }
 
 class Beyblade {
@@ -294,8 +407,13 @@ class Beyblade {
     this.radius = LEVELS[Math.min(level - 1, LEVELS.length - 1)].radius;
     this.power = this.calcPower();
     this.id = Date.now() + Math.random().toString(36).slice(2, 8);
-    // 元素由 品质×等级 确定性派生，保证合成/图鉴/存档一致（五行5元素）
+    // 方案A（2026-09-13 回退）：元素 = f(品质, 等级) = (tierIndex * 7 + (level % 5) * 3) % 5。
+    // 同档 5 个等级各占一个元素，25 种「神兽×元素」组合；元素名是金木水火土，与品质名（神兽）零重名，不读成 bug。
     this.elementIdx = (tierIndex * 7 + (level % 5) * 3) % 5;
+    // P0-3 词条：默认空数组。词条在【获取点】分配（game.js 的抽卡/宝箱/签到/合成/老档迁移），
+    // 而不是构造器里随机 —— 因为敌方陀螺与战斗模拟都直接 new Beyblade：
+    // 构造器随机会让敌方吃上无意义词条、且让所有数值型冒烟测试变得不可复现。
+    this.traits = [];
   }
 
   get tier() {
@@ -313,7 +431,12 @@ class Beyblade {
   }
 
   clone() {
-    return new Beyblade(this.tierIndex, this.level);
+    const c = new Beyblade(this.tierIndex, this.level);
+    // P0-3：克隆必须携带词条与洗词条次数 —— 战斗用的是 playerBb.clone()，
+    // 若丢词条，玩家选好的「暴击强化」在战斗里会被换成一只随机词条（既失真又不可复现）。
+    c.traits = (Array.isArray(this.traits) ? this.traits.map(t => ({ id: t.id })) : []);
+    c.rerolls = this.rerolls || 0;
+    return c;
   }
 
   canMergeWith(other) {
@@ -323,6 +446,20 @@ class Beyblade {
   merge() {
     if (this.level >= 5) return this;
     const next = new Beyblade(this.tierIndex, this.level + 1);
+    // P0-3 词条继承：产物 = 父母词条并集（去重、封顶 2 条）。父母词条相同时并集即 1 条，
+    // 不再额外补抽 —— 「凑两只词条不同的同类合成」成为可追求的合成目标。
+    if (typeof arguments[0] !== 'undefined') {
+      // 新签名 merge(other)：并集继承。旧签名 merge()（无参）保持原行为（产物只带天生 1 条）。
+      const other = arguments[0];
+      const seen = {};
+      const out = [];
+      const add = (t) => {
+        if (t && t.id && !seen[t.id] && out.length < TRAIT_MAX) { seen[t.id] = 1; out.push({ id: t.id }); }
+      };
+      (Array.isArray(this.traits) ? this.traits : []).forEach(add);
+      (other && Array.isArray(other.traits) ? other.traits : []).forEach(add);
+      next.traits = out.length ? out : rollTraits(1);
+    }
     return next;
   }
 
@@ -377,7 +514,10 @@ function glowGradient(ctx, color, r) {
  * LRU淘汰：缓存上限60个，超过时淘汰最久未使用的sprite，避免长期运行后内存泄漏。
  */
 const _spriteCache = {};
-const SPRITE_CACHE_MAX = 60; // 5品质*5等级*2状态=50，留10个余量
+// 内存杠杆（云测 P1·内存峰值 60 分，2026-10-31）：LRU 60 → 32。
+// 图鉴单屏最多 25 个相异 tier:level sprite，32 仍足覆盖；LRU 淘汰保证超上限自动回收，
+// 常驻离屏画布内存约 -2MB，低内存设备（4G）OOM 余量更大。
+const SPRITE_CACHE_MAX = 32;
 let _sprDiagN = 0;           // 真机排障：前 12 次 sprite 烘焙打印 enter 分支，看烘焙前图片是否已就绪
 let _sprDiagFirstPng = false; // 真机排障：PNG 首次就绪的第一次烘焙（分水岭）强制打印一次
 let _sprDiagFail = false;     // 真机排障：离屏画布创建失败只打印一次，避免刷屏
@@ -435,6 +575,16 @@ function getBeybladeSprite(tierIndex, level) {
     if (_sprDiagN <= 12) _log('spr', 'hit', 'tier=' + tierIndex, 'lv=' + level, 'key=' + key, 'fail=' + (!!cached.fail));
     return cached;
   }
+  // ── 源图离屏释放后重烘焙：本帧缓存未命中且源图已被释放（槽位为空）→ 懒重载单图。
+  // 仅当启动全量预载已结束后才走此路径；若槽位仍注册（boot/兜底在管）则不重复发 src。
+  // 重载会重新打开全局 6s 兜底观察（_allPngOk=false），真机静默挂起时由既有的换路兜底覆盖。
+  if (!pngOk && _loadStarted) {
+    const slot = _slotFor(tierIndex, level);
+    if (!slot.store[slot.key]) {
+      _startOne(slot.store, slot.key, slot.file, slot.folder);
+      _allPngOk = false;
+    }
+  }
   const R = LEVELS[Math.min(level - 1, LEVELS.length - 1)].radius;
   // sprite尺寸与对战 _ensureTopSprite 一致：基于 R*2 计算（只包含陀螺本体），不包含光晕外沿
   // 避免sprite尺寸过大导致drawBeyblade绘制时只显示中心部分，陀螺不完整
@@ -472,6 +622,12 @@ function getBeybladeSprite(tierIndex, level) {
     // 偶发合成空白/静默失败（对战页 _ensureTopSprite 从不做 clip 却稳定出图，印证此差异）。
     // 故对齐对战：直接整图绘制、不裁切。PNG 本体本身已是透明底陀螺，无需裁切角标。
     c.drawImage(topImg, -tgt / 2, -tgt / 2, tgt, tgt);
+    // 源图烘焙完成 → 登记 live + 离屏释放（LRU）：源解码内存不再被显示引用，可释放
+    const _bslot = _slotFor(tierIndex, level);
+    if (_bslot.store[_bslot.key] === topImg) {
+      _sourceLive.set(topImg, { store: _bslot.store, key: _bslot.key, lastAccess: Date.now() });
+      _sweepSources();
+    }
   } else {
     // 原矢量本体：外环 + 旋转装饰（6 光点）
     c.strokeStyle = TIERS[tierIndex].color; c.lineWidth = 4;
@@ -517,6 +673,17 @@ function getBeybladeSprite(tierIndex, level) {
   }
   if (_sprDiagN <= 12) _log('spr', 'bake', 'tier=' + tierIndex, 'lv=' + level, 'pngOk=' + pngOk, 'key=' + key, 'offOk=' + (!!(cv && cv.getContext && cv.getContext('2d'))), 'fail=' + (!!entry.fail));
   _spriteCache[key] = entry;
+  // PNG 就绪烘焙完成 → 同档位的旧矢量 sprite（|vec）已永远不会再被请求，立即清掉，
+  // 避免 vec/png 两套 key 双占 sprite 缓存（图鉴 25 档冷启动后最多 50 张死重、直到 LRU 满 60 才淘汰，
+  // 恰好拖着 0.5~1.4MB 的 iOS 瞬态/半常驻尖峰）。矢量仍是 PNG 未就绪时的安全兜底，不删。
+  if (pngOk) {
+    const _vecKey = tierIndex + ':' + level + '|vec';
+    const _oldVec = _spriteCache[_vecKey];
+    if (_oldVec) {
+      if (_oldVec.canvas && typeof _oldVec.canvas.width === 'number') { _oldVec.canvas.width = 0; _oldVec.canvas.height = 0; }
+      delete _spriteCache[_vecKey];
+    }
+  }
   return entry;
 }
 
@@ -544,6 +711,9 @@ function clearSpriteCache() {
       n++;
     }
   } catch (e) {}
+  // 内存告警时同步释放非 PINNED 的源图解码内存（sprite 已清，重烘焙会按需懒重载）
+  _sourceLive.forEach(function (rec, im) { _releaseSlot(rec.store, rec.key); });
+  _sourceLive.clear();
   return n;
 }
 
@@ -573,8 +743,7 @@ function drawBeybladeVector(ctx, x, y, bb, scale, opts = {}) {
     ctx.lineWidth = 3 * scale; ctx.setLineDash([lv * 1.6, 3 + lv]);
     ctx.beginPath(); ctx.arc(0, 0, r + 6 * scale, 0, Math.PI * 2); ctx.stroke(); ctx.setLineDash([]);
   }
-  const el = ELEMENTS[bb.elementIdx];
-  // 元素角标已移至外部 render.js 叠加显示（背包cell/合成台槽位右上角）
+  // 元素角标已移至外部 render.js 叠加显示（背包cell/合成台槽位右上角）——此处不再取 ELEMENTS[...]（取值无人使用）
   ctx.rotate(a);
   // 旋转装饰：6 个正圆光点环绕中心。圆形是旋转对称的——任意转速下视觉稳定，
   // 绝不会像菱形块（旧直线菱形/扁椭圆叶片旋转时轮廓变化 → 像翻转的棱形）。
@@ -670,8 +839,13 @@ module.exports = {
   LEVELS,
   ELEMENTS,
   elementMultiplier,
+  elementBeatenBy,
   randomBeyblade,
   drawBeyblade,
+  // P0-3 词条系统
+  TRAITS,
+  rollTraits,
+  traitById,
   // 内存告警时释放 sprite 离屏缓存（低端机防 OOM 闪退，见 .workbuddy 记忆 2026-09-01）
   clearSpriteCache,
   // 对战页接入等级专属贴图：暴露等级专属图选择器（与内部 _getTierLevelImg 同语义）

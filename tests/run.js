@@ -32,7 +32,10 @@ const SUITES = [
   { file: 'smoke_ads_multiunit.js', desc: '多广告位支持（宝箱独立位 adunit-9d11e5b028812190，不连坐默认位）' },
   { file: 'smoke_ads_onclose_once.js', desc: '广告实例单例 & onClose 单次绑定 & 展示中叠加 show 被 _busy 守卫忽略（防 removeTextView 洪流）' },
   { file: 'smoke_ads_multiton.js', desc: '多广告位 multiton 多例模式 + SDK 强制单例兜底（消除微信「绑定了多次 onError/onClose」告警）' },
+  { file: 'smoke_ads_lru.js', desc: '激励视频实例数上限(maxInstances=5) + LRU 回收(destroy 最久未用空闲位，busy/共享实例不回收)（消除微信「实例过多」告警，2026-09-12 五台 iOS 真机日志定位）' },
+  { file: 'smoke_return_defer.js', desc: '回归礼包延后弹(选项A)：启动不同步判定、onTap 首次有效交互即弹、CONFIG.returnGraceMs 兜底、_pendingReturnInit 整局一次守卫、game 功能未误删' },
   { file: 'smoke_interstitial_multi.js', desc: '抽卡插屏拆 4 独立位（draw3/draw6/draw9/rand2，按抽数调度）' },
+  { file: 'smoke_interstitial_home.js', desc: '首页插屏(2026-10-02)：进首页后延迟自动弹一次，key=home 路由 + load→show 兜底 + 未配置/占位静默跳过 + main.js 接线源码门禁' },
   { file: 'smoke_result_layout.js', desc: '结算页(失败/胜利)布局：再接再厉不压按钮、连战文案不压胶囊' },
   { file: 'smoke_result_gamefeel.js', desc: '结算页游戏化打磨：_settle 触发音效/粒子/起始时间、按钮按下态、能量充电动画' },
   { file: 'smoke_home_v2.js', desc: '主界面游戏化 V2：骨架(去大标题/圆盘放大) + 锻造工坊 + 异形主次按钮 + 命中区不丢 + 回退开关' },
@@ -69,12 +72,26 @@ const SUITES = [
   { file: 'smoke_perf_spintop_grad.js', desc: '对战循环渐变缓存 _gradFor（静态渐变 9/帧 → 0；动画渐变刻意不缓存；跨 ctx 隔离）' },
   { file: 'smoke_offscreen_transparent.js', desc: '离屏画布透明底色回归（守防陀螺/图标「大方块白底」：getBeybladeSprite + _bakeTopSprite 烘焙前先 clearRect）' },
   { file: 'smoke_imgb64_alpha.js', desc: 'imgb64 内联图透明度回归（守防模拟器白方块：data URI 必须 PNG+RGBA，陀螺真实含透明像素）' },
+  { file: 'smoke_arena_bg_sync.js', desc: '对战擂台背景同源回归（守防 DevTools/真机背景不一致：arenabg.js 内联 base64 必须与 battle/images/arena/arena_neon_bg.jpg 同源 sha256+同尺寸+JPEG）' },
   { file: 'smoke_crash_report.js', desc: 'P1 稳定性：生产崩溃上报（运维中心实时日志 + 计数事件 wx.reportEvent，零后端；devtools/空ID/链路抛错/无wx 守卫；旧 Lib 回退 reportMonitor）' },
   { file: 'smoke_bg_memory.js', desc: 'U10 内存优化：非当前视图释放背景图（_releaseInactiveBg）+ LOW 档解码封顶 540p（capForLevel）' },
   { file: 'smoke_perf_startup_mem.js', desc: '启动/内存性能：4 个 base64 shim 打包排除（−954KB，require 守卫防真机崩）+ 离屏退避重探（永久闭锁→2/4/8s…60s）+ 背景位图归零 + render-effects 死代码移除' },
   { file: 'smoke_onboarding.js', desc: 'P0 首程直达轻引导：obStep/obDone/obTries 状态机（新档→抽卡→首胜收口/连败3兜底）+ 存档 roundtrip + 老档 level>1 兼容 + _drawObGlow 无全屏遮罩源码级门禁' },
   { file: 'smoke_draw_reward.js', desc: '抽卡广告位转化（2026-09-06）：4 个插屏位→激励视频，改为「看广告免费再抽一次」按钮；config 新 ID 就位、main 走 Rewarded.show、render 画按钮、game 调度逻辑不变' },
   { file: 'smoke_retention_subscribe.js', desc: '留存 P0：订阅消息封装(config 驱动/no-op 降级) + 启动期自动弹签到纯判定(无副作用) + main 接线与 config 占位门禁' },
+  { file: 'smoke_battle_select.js', desc: '批次F 出战陀螺选择面板(选项B)：selectBattleBeyblade 优先 battleBbId→中央格→战力最高 + 持久化 round-trip + 对战入口改开面板 + render 面板绘制/命中守卫' },
+  { file: 'smoke_battle_select_interact.js', desc: '批次F 选陀螺面板·交互链路门禁（2026-09-12）：真实 Main 实例化+模拟点击——面板互斥/按钮注册/hitTest 命中与不穿透/点行即开战/关闭X/翻页 全链路 + 源码防回退标记' },
+  { file: 'smoke_arena_redraw.js', desc: '批次G 对战擂台实体化重绘（2026-09-12）：金属盘沿/下沉碗体/磨砂磨损/阵营分界/VS 徽章结构锚点 + 敌方色接线 + 烘焙缓存性能承诺 + 运行时真实绘制与兜底不抛错' },
+  { file: 'smoke_battle_select_hint.js', desc: '批次F 选陀螺面板·点选文字提示只弹一次（2026-09-12 用户反馈「每选一只弹一次太吵」）：首次弹一次+入存档跨会话不再弹 + 点选脉冲即时反馈且收敛 + update 递减不依赖面板开关 + 源码防回退' },
+  { file: 'smoke_beast_naming.js', desc: '命名体系（2026-09-13）：TIERS 陀螺名 = 麒麟/青龙/玄武/朱雀/白虎（顺序不变）+ ELEMENTS 元素名 = 金/木/水/火/土（与陀螺名零重名，两轴分离）+ 相克与抽卡概率一分未动 + 图鉴筛选/徽章名对齐 + 可执行代码无旧名残留' },
+  { file: 'smoke_element_formula.js', desc: '方案A·元素=f(品质,等级)（2026-09-13 回退）：(tier*7+(lv%5)*3)%5 精确 + 每档5级覆盖5元素 + 25种「神兽×元素」满 + 元素环倍率不动 + 羁绊按元素跨品质 + 敌方元素随档位 + 老档零迁移 + 面板行只标「元素·X」单字' },
+  // ── P0 三件套（2026-10-31）：生死漏斗 / 开放数据域好友榜 / 金币洗词条 ──
+  { file: 'smoke_funnel.js', desc: 'P0-1 生死漏斗：boot→首抽→首战→首胜→D1回访（reportEvent 通道 + 每安装一次去重 + D1 判定=安装日恰为昨天 + 无wx静默 + 触发点源码级接线）' },
+  { file: 'smoke_leaderboard.js', desc: 'P0-2 开放数据域好友榜：KV 四 key（streak 周口径过滤）+ 同步节流 + noteBattleScore 高分/周连胜 + 假好友榜零残留防回退 + opencontext 纯函数（排序/去重/过期周）+ 主域三榜页签/sharedCanvas 接线' },
+  { file: 'smoke_traits.js', desc: 'P0-3 词条系统：7 词条池 + 获取点分配 + 合成并集继承封顶2 + clone 携带 + 战斗映射（暴击/连击窗/开局怒气/出界线/得分/抽打/回怒）+ 金币洗词条递增定价（含周末半价）+ 存档持久化与老档迁移' },
+  { file: 'smoke_p1_wave.js', desc: 'P1 第二波：#5 激斗周末（限时商店限量/周记账/BOSS积分×2/洗词条半价） + #6 挑战券（每日5免费+广告/分享+2，免费→加发→能量逐层消耗，_battleAgain 免票语义不变） + #7 影子战（纪录局关卡号 + ghost 局目标分≥纪录×1.05） + UI/派发接线门禁' },
+  { file: 'smoke_polish_wave.js', desc: 'P2 细度波：爆发抽打免费化(去隐藏扣能) + 收卡广告预告(手势窗口内) + 图鉴引导(首收卡toast+tab光晕一次性) + 福利中心(签到/任务/助力三合一单入口) + 赛季荣耀(巅峰段位+首达大师限定) + run流派协同(攻/金/守 2层触发) + 回归礼包延后到首次结算' },
+  { file: 'smoke_render_matrix.js', desc: '全链路渲染状态矩阵（2026-11-08）：32 状态×12 帧 render() 零抛错 + 冷启动首帧对齐不暗闪 + 切Tab暗闪回归锁（真机 doFrame ctx not defined 事故门禁）' }
 ];
 
 function runOne(file) {

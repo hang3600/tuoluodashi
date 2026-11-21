@@ -41,13 +41,17 @@ const flush = () => new Promise((r) => realSetTimeout(r, 0));
 (async () => {
   // 初始化：默认位 AD_A + 宝箱位 AD_B + 能量位 AD_C
   Rewarded.init({ adUnitId: 'AD_A', chestAdUnitId: 'AD_B', energyAdUnitId: 'AD_C' });
-  ok('init 预创建 3 个广告位', Rewarded.getStats().adUnitCount === 3);
+  // 预创建上限 = maxInstances - 1：预留 >=1 空位给正在展示的位，避免刚预满就 evict 默认兜底位抖动；
+  // 余下的低频位（此处宝箱 AD_B）由首次 show 懒建兜底。
+  const preloadN = Rewarded.getStats().maxInstances - 1;
+  ok('init 预创建 maxInstances-1 个广告位（预留空位防 evict 抖动）', Rewarded.getStats().adUnitCount === preloadN);
 
   // 宝箱位使用独立广告位 AD_B
   let bReward = false;
   Rewarded.show({ adUnitId: 'AD_B', onReward: () => { bReward = true; }, onFail: () => {} });
   await flush;
   ok('宝箱位调用的是 AD_B 实例', lastShowUnit === 'AD_B');
+  ok('未预建的宝箱位 AD_B 在首次 show 时懒建（adUnitCount=预建+1）', Rewarded.getStats().adUnitCount === preloadN + 1);
   ok('宝箱位看完触发 onReward', bReward === true);
 
   // 能量位使用独立广告位 AD_C

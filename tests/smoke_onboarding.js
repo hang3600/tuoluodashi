@@ -150,6 +150,33 @@ console.log('\n【F】render 源码级：轻引导不打断、两处布局均接
   ok('F9 存档含 obDone/obTries', gameSrc.indexOf('obDone: this.obDone') >= 0 && gameSrc.indexOf('obTries: this.obTries') >= 0);
 }
 
+console.log('\n【E】新号合成台预置：6 抽后自动放一对同品质上合成台（2026-11-01）');
+{
+  if (global.wx) delete global.wx;   // 清掉前段探针塞的存档，保证纯净新档
+  const Main = require(path.join(SRC, 'main.js'));
+  const m = Object.create(Main.prototype);
+  m.game = new GameState();
+  m._pendingNewPlayerInit = true;
+  m._initNewPlayer();
+
+  const slots = m.game.platformSlots;
+  ok('E1 合成台槽 0/2 已预置陀螺、中央格留空',
+    !!slots[0] && !slots[1] && !!slots[2],
+    JSON.stringify(slots.map(x => x ? x.tierIndex : null)));
+  ok('E2 预置对为同品质（可合成）',
+    slots[0].tierIndex === slots[2].tierIndex && slots[0].level === slots[2].level,
+    'tier=' + slots[0].tierIndex + '/' + slots[2].tierIndex);
+  ok('E3 背包剩 4 只（6 抽 - 2 上台）', m.game.inventory.length === 4, 'n=' + m.game.inventory.length);
+  ok('E4 出战兜底不受影响（selectBattleBeyblade 仍返回陀螺）',
+    !!m.game.selectBattleBeyblade());
+  ok('E5 白送能量 80 不变', m.game.energy === 80, 'e=' + m.game.energy);
+  const invBefore = m.game.inventory.length;
+  m._initNewPlayer();   // 幂等性：重复调用不应崩溃（再次 6 抽入背包、平台对仍在）
+  ok('E6 重复调用幂等',
+    m.game.inventory.length === invBefore + 6 && !!m.game.platformSlots[0],
+    'inv=' + m.game.inventory.length);
+}
+
 // 还原全局
 if (global.wx) delete global.wx;
 

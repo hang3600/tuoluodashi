@@ -30,13 +30,20 @@ const STATE = {
     success: 0,
     failed: 0,
     timeout: 0,
-    retries: 0
+    retries: 0,
+    evicted: 0 // LRU 回收的实例数（超出 maxInstances 时销毁最久未用实例）
   },
   // 广告加载配置
   config: {
     maxRetry: 2,        // 最大重试次数
     loadTimeout: 10000, // 加载超时（毫秒）
-    retryDelay: 1000    // 重试间隔（毫秒）
+    retryDelay: 1000,   // 重试间隔（毫秒）
+    // 激励视频实例并发上限：本游戏共 7 个激励位（默认/能量/宝箱/抽卡3/6/9/随机）。
+    // 微信对多例模式会告警「激励视频广告实例过多」（真机 iOS 3.17.2 实测 cap=5 时峰值瞬达 6 个实例即触发）。
+    // 实测结论：destroy 为异步，evict 与 create 同 tick 时 SDK 瞬间仍按 cap+1 计数 —— 故把 cap 压到 3，
+    // 使 SDK 峰值瞬态封顶在 4（远低于触发阈值）。LRU 在超限时销毁最久未用的空闲实例（见 _evictIfNeeded），
+    // 被回收位下次 show 懒重建；高频位（默认/能量）因 lastUsed 常新而少被回收，抖动集中在低频抽卡位。
+    maxInstances: 3
   },
   maxConsecutiveFailures: 3, // 单个广告位连续失败超过此数，临时禁用5分钟
   // 预创建节奏（串行错峰）：默认位 3s → 下一位 +2.5s → 再下一位 +2.5s。
@@ -100,11 +107,49 @@ function _findEntryByAd(ad) {
   return null;
 }
 
+/**
+ * 实例数上限回收（LRU）：微信对多例模式会告警
+ * 「系统检测到您创建的激励视频广告实例过多…请减少实例创建数量或调用 destroy 方法销毁无用的实例」。
+ * 超过 STATE.config.maxInstances 时，销毁「最久未使用且空闲」（不在展示中、无 pending）的实例，
+ * 并从 STATE.ads 移除映射；被回收的广告位下次 show 时由 ensureAd 懒重建，行为无回归。
+ * 注意：SDK 强制单例时（多 entry 共享同一组件实例）跳过销毁——销毁共用组件会导致重绑告警，
+ * 且单例本身实例数恒为 1，不会超限。
+ */
+function _evictIfNeeded() {
+  const cap = STATE.config.maxInstances || 5;
+  const keys = Object.keys(STATE.ads);
+  if (keys.length < cap) return;
+  let victimKey = null;
+  let oldest = Infinity;
+  for (let i = 0; i < keys.length; i++) {
+    const k = keys[i];
+    const e = STATE.ads[k];
+    if (!e || !e.ad || e._busy || e.pending) continue; // 展示中/待结算的位不可回收
+    // 单例兜底：同一组件被多个 entry 共享时不销毁（避免销毁共用实例导致重绑）
+    let sharedCount = 0;
+    for (let j = 0; j < keys.length; j++) {
+      const o = STATE.ads[keys[j]];
+      if (o && o.ad === e.ad) sharedCount++;
+    }
+    if (sharedCount > 1) continue;
+    const ts = e.lastUsed || 0; // 预载未用过的位视为最老，优先回收
+    if (ts < oldest) { oldest = ts; victimKey = k; }
+  }
+  if (!victimKey) return; // 全忙：放行本次创建，功能优先，留待下次 show 再回收
+  const victim = STATE.ads[victimKey];
+  try {
+    if (victim && victim.ad && typeof victim.ad.destroy === 'function') victim.ad.destroy();
+  } catch (err) {}
+  delete STATE.ads[victimKey];
+  STATE.stats.evicted = (STATE.stats.evicted || 0) + 1;
+}
+
 function ensureAd(adUnitId) {
   if (!adUnitId) adUnitId = STATE.adUnitId;
   if (!adUnitId) return null;
   const existing = STATE.ads[adUnitId];
-  if (existing && existing.ad) return existing;
+  if (existing && existing.ad) { existing.lastUsed = Date.now(); return existing; }
+  _evictIfNeeded(); // 创建新实例前先回收超限的最久未用实例（防「实例过多」微信告警）
   if (typeof wx === 'undefined' || !wx.createRewardedVideoAd) return null;
   try {
     // multiton:true —— 小游戏端默认是全局单例，不传则多个 adUnitId 共用同一组件，
@@ -132,7 +177,7 @@ function ensureAd(adUnitId) {
         STATE.stats.timeout++;
       }
     });
-    const entry = { ad, pending: null, settled: false, available: true, consecFails: 0, _busy: false };
+    const entry = { ad, pending: null, settled: false, available: true, consecFails: 0, _busy: false, lastUsed: Date.now() };
     ad.onClose((res) => {
       // B：部分基础库 onClose 无参或 isEnded 缺失，未明确中断即算看完，避免"看完却没发奖"
       const ended = !res || res.isEnded !== false;
@@ -174,6 +219,14 @@ const Rewarded = {
     //
     // 串行错峰（3s / 5.5s / 8s）：真机实测同一 tick 连创 3 个组件会伴随 3 个并发广告拉取，
     // 与首帧渲染抢 CPU/网络；错峰后拉取压力平摊到玩家已进入主界面之后。
+    // 预创建数量上限 = maxInstances - 1：预留 >=1 个空位给「正在展示的位」，避免首屏刚预载满 cap
+    // 就因玩家点开第 4 个广告位而立即 evict 最久未用者（典型即默认兜底位）-> 引发 evict<->create 抖动。
+    // 余下的低频位（如宝箱/抽卡位）改由 show 时懒创建兜底（代码已有），不影响功能、降低实例峰值。
+    const preloadCap = Math.max(1, (STATE.config.maxInstances || 5) - 1);
+    const preloadIds = [];
+    if (STATE.adUnitId) preloadIds.push(STATE.adUnitId);
+    if (energyId) preloadIds.push(energyId);     // 能量独立位：点击频率最高，优先预热，分摊各广告位负载
+    if (chestId) preloadIds.push(chestId);       // 宝箱独立位：宝箱恰好在战斗结束最忙瞬间点击，预热降低"show before ready"竞态
     let delay = STATE.preloadDelay;
     const preload = (id) => {
       if (!id) return;
@@ -181,9 +234,7 @@ const Rewarded = {
       delay += STATE.preloadStep;
       try { if (typeof setTimeout === 'function') setTimeout(function () { ensureAd(id); }, d); } catch (e) {}
     };
-    preload(STATE.adUnitId);
-    if (energyId) preload(energyId);   // 能量独立位：点击频率最高，优先预热，分摊各广告位负载
-    if (chestId) preload(chestId);     // 宝箱独立位：宝箱恰好在战斗结束最忙瞬间点击，预热降低"show before ready"竞态
+    preloadIds.slice(0, preloadCap).forEach(preload);
     // 真机+占位ID：启动时就提醒，避免点按钮才知道
     try {
       if (typeof wx !== 'undefined' && typeof wx.createRewardedVideoAd === 'function' && isPlaceholderId()) {
@@ -359,7 +410,8 @@ const Rewarded = {
     return Object.assign({}, STATE.stats, {
       adAvailable: def ? def.available : true,
       consecutiveFailures: def ? def.consecFails : 0,
-      adUnitCount: Object.keys(STATE.ads).length
+      adUnitCount: Object.keys(STATE.ads).length,
+      maxInstances: STATE.config.maxInstances
     });
   },
 
@@ -378,13 +430,14 @@ const Rewarded = {
       success: 0,
       failed: 0,
       timeout: 0,
-      retries: 0
+      retries: 0,
+      evicted: 0
     };
   }
 };
 
 // ============================================================
-// 插屏广告封装（隐藏式自动弹）：用于「连续抽卡每 N 抽自动插播」
+// 插屏广告封装（隐藏式自动弹）：当前用于「进首页后自动插播」(key='home')，机制对 key 通用。
 // - 与 Rewarded 不同：插屏无奖励、无用户选择，平台强制在场景断点自动弹出
 // - 微信对插屏有频控：两次最小间隔 INTERSTITIAL_MIN_INTERVAL、单日上限由业务层(game.js)控制
 // - 浏览器 / 无 createInterstitialAd / 占位ID / 不可用 → 静默跳过（不报错、不弹）
@@ -392,7 +445,7 @@ const Rewarded = {
 const INTERSTITIAL_MIN_INTERVAL = 60000; // 两次插屏最小间隔(ms)，与微信平台频控对齐，避免被吞/被限
 
 const ISTATE = {
-  ids: {},               // { key: adUnitId }，多插屏位：按 key 区分（抽3/抽6/抽9/逢2随机）
+  ids: {},               // { key: adUnitId }，多插屏位：按 key 区分（现仅 home=进首页后插播）
   ads: {},               // { key: { ad, id, available } }，按 key 懒创建+缓存
   lastShown: 0,          // 上次展示时间戳（全局最小间隔守卫，跨所有插屏位共用，对齐微信平台频控）
   adAvailable: true,     // 连续失败过多时临时禁用（全局）
@@ -445,8 +498,8 @@ function _iEnsure(key) {
 
 const Interstitial = {
   /**
-   * 初始化插屏广告（多广告位）。
-   * @param {Object} units - { draw3, draw6, draw9, rand2 } 各场景独立插屏位（MP 后台「插屏」类型）。
+   * 初始化插屏广告（多广告位，按 key 区分）。
+   * @param {Object} units - 各场景独立插屏位（MP 后台「插屏」类型），现仅 { home }（进首页后插播）。
    */
   init(units) {
     if (units && typeof units === 'object') ISTATE.ids = units;
@@ -467,7 +520,8 @@ const Interstitial = {
     try {
       if (typeof wx !== 'undefined' && typeof wx.createInterstitialAd === 'function') {
         Object.keys(ISTATE.ids || {}).forEach((k) => {
-          if (_iIsPlaceholder(ISTATE.ids[k])) console.warn('[i-ad] 插屏广告位 ' + k + ' 未配置（占位），将静默跳过');
+          const _id = ISTATE.ids[k];
+          if (_id && _iIsPlaceholder(_id)) console.warn('[i-ad] 插屏广告位 ' + k + ' 未配置（占位），将静默跳过');
         });
       }
     } catch (e) {}
@@ -502,23 +556,21 @@ const Interstitial = {
     if (ISTATE.ads[key]) ISTATE.ads[key]._busy = true;
     const onShown = () => { if (ISTATE.ads[key]) ISTATE.ads[key]._busy = false; if (opts.onShown) opts.onShown(); };
     const onFail = () => { if (ISTATE.ads[key]) ISTATE.ads[key]._busy = false; ISTATE.pending = null; if (opts.onSkip) opts.onSkip(); };
-    const retry = () => {
+    // 先 load 再 show：插屏组件冷创建后直接 show 常被 SDK 拒（"not loaded"），
+    // 统一 load→show 最稳，与 Rewarded 一致；load 失败则兜底 onSkip（不弹、不报错）。
+    const doShow = () => {
       try {
-        const p2 = ad.show();
-        if (p2 && p2.then) p2.then(onShown).catch(onFail);
+        const p = ad.show();
+        if (p && p.then) p.then(onShown).catch(onFail);
+        else if (p && p.catch) p.catch(onFail);
         else onShown();
       } catch (e) { onFail(); }
     };
-    try {
-      const p = ad.show();
-      if (p && p.then) {
-        p.then(onShown).catch(() => { try { ad.load().then(retry).catch(onFail); } catch (e) { onFail(); } });
-      } else if (p && p.catch) {
-        p.catch(() => { try { ad.load().then(retry).catch(onFail); } catch (e) { onFail(); } });
-      } else {
-        onShown();
-      }
-    } catch (e) { onFail(); }
+    if (typeof ad.load === 'function') {
+      try { ad.load().then(doShow).catch(doShow); } catch (e) { doShow(); }
+    } else {
+      doShow();
+    }
   }
 };
 

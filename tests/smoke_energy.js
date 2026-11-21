@@ -1,8 +1,10 @@
-// 冒烟套件 7 —— P0-3 战败能量惩罚（扣除额与结算页显示一致）
+// 冒烟套件 7 —— 战败能量策略（P2 细度重写 2026-10-31）
 //
-// 背景：历史上出现过三处漂移 —— 注释写 -25、代码实际扣 50、结算页却显示「能量 -15」。
-// 玩家看到的损失只有真实值的 30%。现在收敛为常量 LOSE_ENERGY_PENALTY，
-// 扣除与文案都读它，本套件锁死二者永不脱节。
+// 历史背景：曾收敛为常量 LOSE_ENERGY_PENALTY(15)，扣除与结算页文案都读它。
+// P2 细度修复：战败惩罚**整体停用** —— 门票 20 + 战败扣 15 + 回能 2/秒 构成对失败者的
+// 三重惩罚，新手挫败感叠加；竞品惯例是失败不扣资源、节奏全靠门票控制。
+// 本套件改为锁定新行为：战败零扣除 + 结算页不再渲染「−N」扣能文案 +
+// 惩罚常量保持 0（保留导出防兼容断裂，恢复路径见常量注释）。
 process.env.TZ = 'Asia/Shanghai';
 const fs = require('fs');
 const path = require('path');
@@ -18,7 +20,7 @@ function ok(name, cond, extra) {
   else { fail++; console.log('  ❌ ' + name + (extra ? '  → ' + extra : '')); }
 }
 
-console.log('\n【P0-3-a】战败实际扣除额 == 结算页显示值');
+console.log('\n【P2-a】战败不扣能量（门票 20 是全部成本）');
 {
   const g = new GameState();
   const b = new SpintopBattle(g, 375, 812);
@@ -34,11 +36,11 @@ console.log('\n【P0-3-a】战败实际扣除额 == 结算页显示值');
   const delta = before - g.energy;
 
   ok('判定为失败', b.result === 'lose', 'result=' + b.result + ' phase=' + b.phase);
-  ok(`实际扣除 ${delta} 等于常量 LOSE_ENERGY_PENALTY(${LOSE_ENERGY_PENALTY})`,
-    delta === LOSE_ENERGY_PENALTY, 'delta=' + delta);
+  ok(`战败零扣除（${before} → ${g.energy}，delta=${delta}）`, delta === 0, 'delta=' + delta);
+  ok('LOSE_ENERGY_PENALTY 常量为 0（兼容导出保留）', LOSE_ENERGY_PENALTY === 0);
 }
 
-console.log('\n【P0-3-b】胜利不扣惩罚（负向用例）');
+console.log('\n【P2-b】胜利同样不扣（负向用例不变）');
 {
   const g = new GameState();
   const b = new SpintopBattle(g, 375, 812);
@@ -56,25 +58,18 @@ console.log('\n【P0-3-b】胜利不扣惩罚（负向用例）');
   ok('胜利不额外扣能量（仅门票）', g.energy === before, before + ' → ' + g.energy);
 }
 
-console.log('\n【P0-3-c】结算页文案由常量生成，源码无硬编码数字');
+console.log('\n【P2-c】结算页不再渲染「−N」扣能文案；扣除代码已移除');
 {
   const src = fs.readFileSync(path.join(__dirname, '..', 'battle', 'spintop.js'), 'utf8');
-  ok('扣能文案由 LOSE_ENERGY_PENALTY 拼接', /'−'\s*\+\s*LOSE_ENERGY_PENALTY/.test(src));
+  ok('结算页无「−」+ LOSE_ENERGY_PENALTY 扣能文案', !/'−'\s*\+\s*LOSE_ENERGY_PENALTY/.test(src));
+  ok('_settle 失败分支无能量扣除行', src.indexOf('this.game.energy - LOSE_ENERGY_PENALTY') < 0);
   const hardcoded = src.match(/'能量\s*-\d+'/g) || [];
   ok('无硬编码的「能量 -N」字面量', hardcoded.length === 0, hardcoded.join(', '));
-  const literalDeduct = src.match(/this\.game\.energy - \d+/g) || [];
-  ok('扣除处无硬编码数字字面量', literalDeduct.length === 0, literalDeduct.join(', '));
 }
 
-console.log('\n【P0-3-d】惩罚值合理性（保留张力但不劝退）');
+console.log('\n【P2-d】失败总成本 = 门票 20（与胜利同价，输赢差只体现在收益侧）');
 {
-  const g = new GameState();
-  const ratio = LOSE_ENERGY_PENALTY / g.maxEnergy;
-  ok(`惩罚 > 0（保留"输比赢亏"的张力）`, LOSE_ENERGY_PENALTY > 0, 'v=' + LOSE_ENERGY_PENALTY);
-  ok(`占能量上限 ${(ratio * 100).toFixed(0)}%（≤20%，首次战败不至于掉一大截）`,
-    ratio <= 0.2, 'ratio=' + ratio.toFixed(3) + ' maxEnergy=' + g.maxEnergy);
-  ok(`失败总成本(门票20+惩罚${LOSE_ENERGY_PENALTY}) 仍显著高于胜利成本(20)`,
-    20 + LOSE_ENERGY_PENALTY > 20, 'lose=' + (20 + LOSE_ENERGY_PENALTY) + ' win=20');
+  ok('战败总成本 20 == 胜利总成本 20（门票同价，惩罚为 0）', 20 + LOSE_ENERGY_PENALTY === 20);
 }
 
 console.log('\n────────────────────────');

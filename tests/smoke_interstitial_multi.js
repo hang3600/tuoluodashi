@@ -49,7 +49,7 @@ const flush = () => new Promise((r) => realSetTimeout(r, 0));
   lastShownId = null;
   let shown3 = false;
   Interstitial.show({ key: 'draw3', onShown: () => { shown3 = true; }, onSkip: () => {} });
-  await flush;
+  await flush();
   ok('draw3 展示用对应位 I3', lastShownId === 'I3');
   ok('draw3 onShown 触发', shown3 === true);
 
@@ -59,7 +59,7 @@ const flush = () => new Promise((r) => realSetTimeout(r, 0));
   // 未知 key → onSkip（静默跳过，不报错）
   let skipped = false;
   Interstitial.show({ key: 'drawX', onShown: () => {}, onSkip: () => { skipped = true; } });
-  await flush;
+  await flush();
   ok('未知 key 走 onSkip（静默跳过）', skipped === true);
 
   // ---- 2) 调度映射（game.js，纯规则）----

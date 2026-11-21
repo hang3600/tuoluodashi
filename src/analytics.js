@@ -124,6 +124,101 @@ function reportAdWatch() {
   reportBranch(_branchIds.adWatch, '', 1);
 }
 
+// ===================== 生死漏斗（P0-1 · 2026-10-31） =====================
+// 五级漏斗：boot → first_draw(首抽) → first_battle(首战) → first_win(首胜) → d1_return(D1回访)
+//
+// 为什么另起 reportEvent 通道：branchId 必须在 MP 后台逐场景创建后回填（analyticsBranch
+// 目前全空 = branch 通道线上不上报），而 wx.reportEvent 的事件名由代码定义，只需在
+// MP 后台「运维中心 → WE分析 → 数据管理 → 上报管理」新建同名事件即可收数（一次配置）。
+// 两通道互补：branch 看场景/维度分布，reportEvent 看漏斗转化率。
+//
+// 纪律（与 branch 通道同构）：
+//   - 全部 once-per-install（storage 去重），重复调用不重复计数；
+//   - 未在后台注册的事件，上报被微信静默丢弃 —— 绝不影响玩法；
+//   - wx 缺失 / API 缺失 / 异常 → 静默跳过（Node 无头测试安全）；
+//   - 统一上报 { count: 1 } 数值维度，后台可直接求和。
+
+// 一次性配置：CONFIG.funnel = { enabled, prefix }（见 config.js 顶部注释）
+let _funnelCfg = { enabled: true, prefix: 'bb_funnel_' };
+try {
+  const _cfg2 = require('./config');
+  if (_cfg2 && _cfg2.CONFIG && _cfg2.CONFIG.funnel) _funnelCfg = _cfg2.CONFIG.funnel;
+} catch (e) {}
+
+// 本地日期 key（与 game._todayKey 同口径：本地时区零填充 YYYY-MM-DD。
+// 此前若有两套口径会差一天，D1 判定必须与签到/每日重置一致）
+function _dayKey(d) {
+  const n = d || new Date();
+  const m = n.getMonth() + 1, dd = n.getDate();
+  return n.getFullYear() + '-' + (m < 10 ? '0' + m : m) + '-' + (dd < 10 ? '0' + dd : dd);
+}
+
+// 安装日（首次启动那天）：第一次调用时写入 storage，此后恒定。
+function _installDay() {
+  try {
+    if (typeof wx === 'undefined' || !wx.getStorageSync) return '';
+    let day = wx.getStorageSync('bb_install_day');
+    if (!day) {
+      day = _dayKey();
+      if (wx.setStorageSync) wx.setStorageSync('bb_install_day', day);
+    }
+    return String(day);
+  } catch (e) { return ''; }
+}
+
+// storage 去重：该 key 已标记过 → true（并保证不重写）；未标记 → 标记并返回 false
+function _onceMark(key) {
+  try {
+    if (typeof wx === 'undefined' || !wx.getStorageSync) return true; // 无 storage 视为已处理（不上报）
+    if (wx.getStorageSync(key)) return true;
+    if (wx.setStorageSync) wx.setStorageSync(key, 1);
+    return false;
+  } catch (e) { return true; }
+}
+
+// 底层：WE分析自定义事件。事件未在后台注册时微信静默丢弃，此处只做防御不感知。
+function _reportEvent(name) {
+  try {
+    if (!_funnelCfg || !_funnelCfg.enabled) return;
+    if (typeof wx === 'undefined' || !wx.reportEvent) return;
+    wx.reportEvent(String(name), { count: 1 });
+  } catch (e) {}
+}
+
+// 单步漏斗（once-per-install）：step = boot/first_draw/first_battle/first_win/d1_return
+function _funnelOnce(step) {
+  const key = 'bb_funnel_once_' + step;
+  if (_onceMark(key)) return false;
+  _reportEvent((_funnelCfg.prefix || 'bb_funnel_') + step);
+  return true;
+}
+
+// 冷启动（每安装一次）。触发点 main.js 构造尾部，与 reportBoot 并列。
+function reportFunnelBoot() { return _funnelOnce('boot'); }
+
+// 首抽（每安装一次，含新号白送 6 连抽里的第一抽）。触发点 game.draw() 成功分支。
+function reportFunnelFirstDraw() { return _funnelOnce('first_draw'); }
+
+// 首战（每安装一次，胜/负都算；_startBattle 是全部开战路径唯一入口）。触发点 main._startBattle。
+function reportFunnelFirstBattle() { return _funnelOnce('first_battle'); }
+
+// 首胜（每安装一次）。触发点 spintop._settle 胜利分支。
+function reportFunnelFirstWin() { return _funnelOnce('first_win'); }
+
+// D1 回访（每安装一次）：启动时安装日恰好是昨天 → 该用户完成了"次日回访"。
+// 跨过一天以上的回流不算 D1（那是 D3/D7 的事，后续需要再加一步即可）。
+function reportFunnelD1Return() {
+  try {
+    const install = _installDay();
+    if (!install) return false;
+    const today = _dayKey();
+    if (install === today) return false;                 // 安装当天启动，不算回访
+    const yesterday = _dayKey(new Date(Date.now() - 86400000));
+    if (install !== yesterday) return false;             // 隔了 2+ 天才回，不算 D1
+    return _funnelOnce('d1_return');
+  } catch (e) { return false; }
+}
+
 module.exports = {
   reportBoot,
   reportBattleStart,
@@ -133,5 +228,11 @@ module.exports = {
   reportBattleDefeat,
   reportShare,
   reportAdWatch,
-  FIRST_DONE_KEY
+  FIRST_DONE_KEY,
+  // 生死漏斗（P0-1）
+  reportFunnelBoot,
+  reportFunnelFirstDraw,
+  reportFunnelFirstBattle,
+  reportFunnelFirstWin,
+  reportFunnelD1Return
 };

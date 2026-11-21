@@ -110,8 +110,9 @@ console.log('\n【结果页-失败】能量模块：目标行在能量卡之上�
   ok('记录了「目标 …」文案', !!target);
   ok('记录了「能量 当前/上限」文案', !!energyLbl, JSON.stringify(ctx.__rec.texts.map(t => t.text)));
   ok('能量文案显示当前值 120/150', !!energyLbl && energyLbl.text === '能量 120/150', energyLbl && energyLbl.text);
-  ok('记录了「−15」本局扣除', !!penalty);
-  ok('能量文案与扣除同排（行1）', !!energyLbl && !!penalty && Math.abs(energyLbl.y - penalty.y) < 0.5,
+  // P2 细度（2026-10-31）：战败惩罚停用 → 结算页不再渲染「−N」扣能文案；反向断言防回退
+  ok('已停用：结算页不再出现「−15」扣能文案', !penalty);
+  ok('能量文案仍在（当前/上限展示保留）', !!energyLbl,
     energyLbl && penalty ? `lblY=${energyLbl.y.toFixed(0)} penY=${penalty.y.toFixed(0)}` : 'missing');
   ok('目标行严格位于能量模块之上（不重叠、留呼吸 ≥20px）',
     !!target && !!energyLbl && (energyLbl.y - target.y) >= 20,

@@ -91,8 +91,12 @@ console.log('\n【6 main._startCoop 门控（enabled 灰度）】');
 
   // 开灰度
   CONFIG.coop.enabled = true;
+  // P1-6 挑战券：新开一局先消耗免费券（5/日）——本组验证的是能量门票路径，先耗尽免费券；
+  // （免费券优先的行为本身由 smoke_p1_wave 锁定）
+  m.game.ticketDate = m.game._todayKey();
+  m.game.freeTicketsUsed = 5;
   m._startCoop();
-  ok('enabled=true 时扣 20 能量门票', m.game.energy === 0, 'e=' + m.game.energy);
+  ok('enabled=true 时扣 20 能量门票（免费券已耗尽走能量层）', m.game.energy === 0, 'e=' + m.game.energy);
   ok('以 coop:true + stage=minStage 开战', starts.length === 1 && starts[0].coop === true && starts[0].stage === CONFIG.coop.minStage,
     'opts=' + JSON.stringify(starts[0]));
   CONFIG.coop.enabled = false;   // 还原
@@ -134,7 +138,9 @@ console.log('\n【9 spintop settle 源码级闸门（只记战绩不发资源）
   ok('coop 不计竞技分', /if \(!this\.coop && this\.game && typeof this\.game\.addArenaScore/.test(src));
   ok('coop 不加连胜', /if \(!this\.coop && this\.game && typeof this\.game\.winStreak === 'number'\) this\.game\.winStreak \+= 1/.test(src));
   ok('coop 不加经验 / 掉宝 / 开箱（均被 ialilik !this.coop 门控）', /if \(!this\.coop && this\.game && typeof this\.game\.addExp/.test(src) && /if \(!this\.coop && Math\.random\(\)/.test(src));
-  ok('coop 战败免能量惩罚', /if \(!this\.coop\) this\.game\.energy/.test(src));
+  // P2 细度（2026-10-31）：战败能量惩罚整体停用（LOSE_ENERGY_PENALTY=0）——
+  // coop 与普通战败一致：不再有任何扣除行；断言改为「惩罚代码已移除」。
+  ok('coop 战败免能量惩罚（惩罚行已随全局停用而移除）', src.indexOf('this.game.energy - LOSE_ENERGY_PENALTY') < 0);
   ok('coop 胜利记战绩 hook', /recordCoopWin\(this\.runStage\)/.test(src));
   ok('贡献统计按持方累计', /if \(this\.coop\) this\.coopContrib\[this\.coopActive\] \+= earnedScore/.test(src));
   ok('passPhone / 双人 HUD 命中区', /passPhone\(\)/.test(src) && /action: 'coop_pass'/.test(src));

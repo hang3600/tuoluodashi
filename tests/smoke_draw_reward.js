@@ -52,7 +52,9 @@ console.log('\n【2】main.js：收卡自动弹激励视频（无按钮 / 无 _o
   ok('_dismissDrawCard 内调用 Rewarded.show（收卡自动弹）', /_dismissDrawCard\(\)[\s\S]*?Rewarded\.show\(/.test(mainSrc));
   ok('unitMap 引用 4 个 drawAdUnitId*', mainSrc.indexOf('CONFIG.drawAdUnitId3') >= 0 && mainSrc.indexOf('CONFIG.drawAdUnitId6') >= 0 && mainSrc.indexOf('CONFIG.drawAdUnitId9') >= 0 && mainSrc.indexOf('CONFIG.drawAdUnitIdRand') >= 0);
   ok('收卡时消费广告位（置空 _drawRewardKey）', mainSrc.indexOf('this.game._drawRewardKey = null') >= 0);
-  ok('无遗留 Interstitial.show / _drawAdPending', mainSrc.indexOf('Interstitial.show(') < 0 && mainSrc.indexOf('this._drawAdPending') < 0 && mainSrc.indexOf('this._drawAdPendingKey') < 0);
+  const _homeIshow = /Interstitial\.show\(\{\s*key:\s*'home'/.test(mainSrc);
+  const _noDrawIshow = !/Interstitial\.show\(\{\s*key:\s*'(draw3|draw6|draw9|rand2)'/.test(mainSrc);
+  ok('无遗留 draw 流程插屏(Interstitial.show draw*)，仅保留首页 home 插屏', _noDrawIshow && _homeIshow && mainSrc.indexOf('this._drawAdPending') < 0 && mainSrc.indexOf('this._drawAdPendingKey') < 0);
 }
 
 console.log('\n【3】输入分支 + render：绝无「看广告免费再抽」按钮');
@@ -80,6 +82,35 @@ console.log('\n【5】调度落地到自动弹（_maybeScheduleDrawAd → _dismi
 {
   ok('_maybeScheduleDrawAd 把 key 记到 _drawRewardKey', mainSrc.indexOf('this.game._drawRewardKey = key') >= 0);
   ok('_dismissDrawCard 读取 _drawRewardKey 并弹出', /const adKey = this\.game\._drawRewardKey[\s\S]*?Rewarded\.show\(/.test(mainSrc));
+}
+
+console.log('\n【6】选项 A：保留隐藏自动弹，看完给小额金币（拉高看完率）');
+{
+  ok('config.drawAdRewardCoins = 50（看完发奖金额，可调）', CONFIG.drawAdRewardCoins === 50, CONFIG.drawAdRewardCoins);
+  ok('onReward 读取配置 CONFIG.drawAdRewardCoins', mainSrc.indexOf('const rewardCoins = CONFIG.drawAdRewardCoins') >= 0);
+  ok('看完发奖：onReward 内 this.game.coins += rewardCoins', mainSrc.indexOf('this.game.coins += rewardCoins') >= 0);
+  ok('看完发奖有 toast 反馈（看广告 +金币）', mainSrc.indexOf("'看广告 +' + rewardCoins + ' 金币'") >= 0);
+  ok('发奖后落盘（防崩溃丢金）', mainSrc.indexOf('发奖落盘') >= 0);
+  ok('看完漏斗上报（reportAdWatch，监控看完率）', mainSrc.indexOf('reportAdWatch();') >= 0);
+}
+
+console.log('\n【7】奖励升级：看完抽卡广告 → 免费再抽 1 次（2026-11-01 P2 广告优化）');
+{
+  const cfgSrc = fs.readFileSync(path.join(__dirname, '..', 'src', 'config.js'), 'utf8');
+  ok('config.drawAdRewardMode = redraw（奖励升级模式）',
+    /drawAdRewardMode:\s*'redraw'/.test(cfgSrc));
+  ok('drawAdRewardCoins 保留（coins 回退模式用）', CONFIG.drawAdRewardCoins === 50);
+  ok('onReward 设置 _pendingFreeRedraw（redraw 模式）',
+    /redrawMode\)[\s\S]{0,200}_pendingFreeRedraw\s*=\s*true/.test(mainSrc));
+  ok('onClose ended 后自动执行免费再抽（_doDraw free）',
+    mainSrc.indexOf('this._pendingFreeRedraw = false;') >= 0 &&
+    mainSrc.indexOf('_doDraw({ x: this.cw / 2, y: this.ch * 0.42 }, { free: true })') >= 0);
+  ok('频控拦截时 key 顺延不沉没（_drawRewardKey = adKey 回写）',
+    mainSrc.indexOf('this.game._drawRewardKey = adKey;') >= 0);
+  ok('reportAdWatch 已正式 import（修复：此前抽卡位 adWatch 从未上报）',
+    /const \{[^}]*reportAdWatch[^}]*\}\s*=\s*require\('\.\/analytics'\)/.test(mainSrc));
+  ok('预告 toast 文案随模式切换（免费再抽）',
+    mainSrc.indexOf('看完免费再抽 1 次') >= 0);
 }
 
 console.log('\n════════════════════════════');

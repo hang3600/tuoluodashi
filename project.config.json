@@ -1,5 +1,5 @@
 {
-  "description": "陀螺大师：合成升级，集齐传说陀螺",
+  "description": "陀螺大师：合成升级，集齐白虎陀螺",
   "packOptions": {
     "ignore": [
       {
@@ -34,6 +34,7 @@
         "value": "src/codexbg.js",
         "type": "file"
       },
+
       {
         "value": "battle/arenabg.js",
         "type": "file"

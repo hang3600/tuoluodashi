@@ -258,6 +258,22 @@ const Sfx = {
       countdown: { freq: 660, type: 'sine', dur: 0.12, gain: 0.12 },
       collect:   { freq: 880, slideTo: 1320, type: 'triangle', dur: 0.15, gain: 0.13 }
     };
+    // 成熟感·多音符 Jingle（2026-11-21）：里程碑时刻单音撑不起仪式——
+    //   record  = 破纪录号角（上行三连音 do-mi-so，金亮三角波）
+    //   legend  = 传说出货三连音（琶音上行 + 高八度收尾）
+    const jingles = {
+      record: [523, 659, 784],                                  // C5-E5-G5
+      legend: [523, 659, 784, 1046]                             // C5-E5-G5-C6
+    };
+    if (jingles[type]) {
+      const notes = jingles[type];
+      notes.forEach((freq, i) => {
+        setTimeout(() => {
+          try { this._tone({ freq, type: 'triangle', dur: 0.16, gain: 0.15 }); } catch (e) {}
+        }, i * 110);
+      });
+      return;
+    }
     const p = presets[type] || presets.click;
     if (override) {
       if (override.freq !== undefined) p.freq = override.freq;

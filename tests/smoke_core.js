@@ -1,10 +1,10 @@
-// 冒烟套件 1/4 —— 核心：传说保底品质、保底计数清零、保底券语义、每日时区口径、签到去重、每日限额、每日任务
+// 冒烟套件 1/4 —— 核心：白虎保底品质、保底计数清零、保底券语义、每日时区口径、签到去重、每日限额、每日任务
 // 路径相对化：无论从哪个目录调用，都基于本文件位置定位 src/
 process.env.TZ = 'Asia/Shanghai';
 
 const path = require('path');
 const SRC_DIR = path.resolve(__dirname, '..', 'src');
-const { GameState } = require(path.join(SRC_DIR, 'game.js'));
+const { GameState, SIGN_REWARDS } = require(path.join(SRC_DIR, 'game.js'));
 const { TIERS } = require(path.join(SRC_DIR, 'beyblade.js'));
 
 let pass = 0, fail = 0;
@@ -24,18 +24,18 @@ function freeze(y, mo, d, h, mi) {
 }
 function unfreeze() { global.Date = require('vm').runInThisContext('Date'); }
 
-console.log('\n【1】传说保底产出品质（P0-1）');
+console.log('\n【1】白虎保底产出品质（P0-1）');
 {
   const g = new GameState();
   g.energy = 1e6;
-  g.pityLegend = 29;   // 下一抽触发传说保底
+  g.pityLegend = 29;   // 下一抽触发白虎保底
   g.pityEpic = 0;
   const bb = g.draw();
   ok('保底产出 tierIndex === 4', bb.tierIndex === 4, '实际 ' + bb.tierIndex + ' ' + TIERS[bb.tierIndex].name);
-  ok('保底产出是金·传说', TIERS[bb.tierIndex].key === 'metal', TIERS[bb.tierIndex].name);
+  ok('保底产出是金·白虎', TIERS[bb.tierIndex].key === 'metal', TIERS[bb.tierIndex].name);
 }
 
-console.log('\n【2】传说保底计数只在真传说时清零（P0-2）');
+console.log('\n【2】白虎保底计数只在真传说时清零（P0-2）');
 {
   const g = new GameState();
   g.energy = 1e6;
@@ -53,8 +53,8 @@ console.log('\n【2】传说保底计数只在真传说时清零（P0-2）');
       if (g.pityLegend !== 0) legendDidReset = false;
     }
   }
-  ok('抽到火·精英(3) 不清零传说保底', eliteDidNotReset && sawElite, '样本命中=' + sawElite);
-  ok('抽到金·传说(4) 清零传说保底', legendDidReset && sawLegend, '样本命中=' + sawLegend);
+  ok('抽到火·精英(3) 不清零白虎保底', eliteDidNotReset && sawElite, '样本命中=' + sawElite);
+  ok('抽到金·白虎(4) 清零白虎保底', legendDidReset && sawLegend, '样本命中=' + sawLegend);
 }
 
 console.log('\n【3】保底券 = 下一抽必出（同族修复）');
@@ -64,10 +64,10 @@ console.log('\n【3】保底券 = 下一抽必出（同族修复）');
   g.pityLegend = 3;
   g._pendingReturn = 'grand';
   const r = g.claimReturn();
-  ok('回归大礼包发放传说保底券', r && r.coupon === true);
+  ok('回归大礼包发放白虎保底券', r && r.coupon === true);
   ok('券把 pityLegend 置 29（而非 0）', g.pityLegend === 29, '实际 ' + g.pityLegend);
   const bb = g.draw();
-  ok('下一抽确实出金·传说', bb.tierIndex === 4, TIERS[bb.tierIndex].name);
+  ok('下一抽确实出金·白虎', bb.tierIndex === 4, TIERS[bb.tierIndex].name);
 }
 {
   const g = new GameState();
@@ -123,6 +123,63 @@ console.log('\n【5】签到去重：UTC+8 凌晨窗口（P0-3 复现路径）')
   g.canSign();
   ok('断签后 streak 清零', g.signStreak === 0, 'streak=' + g.signStreak);
   unfreeze();
+}
+
+console.log('\n【5.5】免费抽卡券（D1 留客钩子 · 2026-11-20）：签到第2/4/6天发放 + 分享 +1 + 消耗 + 存档');
+{
+  const g = new GameState();
+  ok('奖励表：第2天发免费抽卡券×1', SIGN_REWARDS[1].freeDraw === 1);
+  ok('奖励表：第4天发免费抽卡券×1', SIGN_REWARDS[3].freeDraw === 1);
+  ok('奖励表：第6天发免费抽卡券×1', SIGN_REWARDS[5].freeDraw === 1);
+  ok('初始无券', (g.freeDraws || 0) === 0);
+  const r1 = g.checkIn();   // 第 1 天：金币日，无券
+  ok('第1天不发券', r1.freeDraw === 0 && g.freeDraws === 0);
+  ok('无券时消耗被拒', g.consumeFreeDraw() === false);
+  // 跳到第 2 天签到 → 应发券
+  g.signDate = g._dayKeyOffset(-1);
+  g.signClaimed = false;
+  const r2 = g.checkIn();
+  ok('第2天签到发券×1', r2 && r2.freeDraw === 1 && g.freeDraws === 1, 'freeDraw=' + (r2 && r2.freeDraw) + ' held=' + g.freeDraws);
+  ok('有券时可消耗', g.consumeFreeDraw() === true && g.freeDraws === 0);
+  // 分享 +1 券（上限 3 防囤积）
+  g.doShare();
+  ok('分享奖励含免费抽卡券+1', g.freeDraws === 1);
+  for (let i = 0; i < 5; i++) g.doShare();
+  ok('分享发券封顶 3 张（防囤积）', g.freeDraws === 3, 'held=' + g.freeDraws);
+  // 存档往返：本套件无 wx 环境（save 为空操作），块内临时挂最小存储桩验证，结束后还原
+  const savedWx = typeof global.wx !== 'undefined' ? global.wx : undefined;
+  const memStore = {};
+  const mockWx = {
+    setStorageSync: function (k, v) { memStore[k] = v; },
+    getStorageSync: function (k) { return Object.prototype.hasOwnProperty.call(memStore, k) ? memStore[k] : ''; },
+  };
+  global.wx = mockWx;
+  g.save(true);
+  const g2 = new GameState();
+  g2.load();
+  ok('存档往返保留 freeDraws', (g2.freeDraws || 0) === 3, 'loaded=' + g2.freeDraws);
+  // 老档缺字段 → Number 兜底 0（键名与 src/game.js STORAGE_KEY 一致）
+  memStore.beyblade_master_save_v2 = JSON.stringify({ schemaVersion: 2 });
+  const g3 = new GameState();
+  g3.load();
+  ok('老档缺字段安全（Number 兜底 0）', typeof g3.freeDraws === 'number');
+  if (savedWx === undefined) delete global.wx; else global.wx = savedWx;
+}
+
+console.log('\n【5.6】官方「朋友推荐」组件接入门禁（2026-11-21）：官方常量 openlink + 纯自发引导（无道具奖励）');
+{
+  const fs2 = require('fs');
+  const mainSrc2 = fs2.readFileSync(path.join(SRC_DIR, 'main.js'), 'utf8');
+  ok('main.js 定义 _openGameRecommend（官方最佳实践）',
+     /_openGameRecommend\(\)[\s\S]{0,600}createPageManager/.test(mainSrc2));
+  ok('使用官方推荐组件 OPENLINK 常量',
+     mainSrc2.indexOf('TWFRCqV5WeM2AkMXhKwJ03MhfPOieJfAsvXKUbWvQFQtLyyA5etMPabBehga950uzfZcH3Vi3QeEh41xRGEVFw') >= 0);
+  ok('监听 destroy 回调感知真实推荐（isRecommended）',
+     /on\(\s*'destroy'[\s\S]{0,200}isRecommended/.test(mainSrc2) || /isRecommended/.test(mainSrc2));
+  ok('无道具奖励刺激（官方不提倡：doClubRecommend 已移除）',
+     mainSrc2.indexOf('doClubRecommend') < 0);
+  const spinSrc2 = fs2.readFileSync(path.join(SRC_DIR, '..', 'battle', 'spintop.js'), 'utf8');
+  ok('结算胜利屏含「推荐」键（battle_recommend）', spinSrc2.indexOf('battle_recommend') >= 0);
 }
 
 console.log('\n【6】其余每日限额走同一口径');
