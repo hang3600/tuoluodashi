@@ -21,7 +21,7 @@ console.log('\n【1 icon 令牌】');
 
 console.log('\n【2 render 图标按钮统一描边取令牌】');
 {
-  ok('drawIconButton 描边取 UI.icon.stroke', /ctx\.strokeStyle = pressed \? 'rgba\(255,255,255,0\.55\)' : UI\.icon\.stroke/.test(rsrc));
+  ok('drawIconButton 描边取 UI.icon.stroke（按下态=ink.body 令牌，评审归一 2026-11-22）', /ctx\.strokeStyle = pressed \? UI\.color\.ink\.body : UI\.icon\.stroke/.test(rsrc));
   ok('drawIconButton 描边粗细取 UI.icon.weight', /ctx\.lineWidth = UI\.icon\.weight/.test(rsrc));
   ok('矢量回退取 UI.icon.glyph(白)', /drawVectorIcon\(ctx, iconType,[\s\S]*?UI\.icon\.glyph/.test(rsrc));
   ok('注释标记 ③3-3 统一描边', /③3-3 统一描边/.test(rsrc));

@@ -1009,7 +1009,7 @@ class Renderer {
     // 圆形图标：先裁圆再画 PNG（icon-coin 底为方形，clip 成圆形与设计稿一致）
     const coinIc = coinX + coinPad + coinIcon / 2;
     ctx.beginPath(); ctx.arc(coinIc, coinCy, coinIcon / 2, 0, Math.PI * 2); ctx.clip();
-    if (!this._drawPngIcon('coin', coinIc, coinCy, coinIcon)) drawVectorIcon(ctx, 'coin', coinIc, coinCy, coinIcon, '#FFD700');
+    if (!this._drawPngIcon('coin', coinIc, coinCy, coinIcon)) drawVectorIcon(ctx, 'coin', coinIc, coinCy, coinIcon, '#ffd54f');
     ctx.restore();
     ctx.fillStyle = '#ffd54f';
     ctx.font = 'bold 15px ' + APPLE_FONT;
@@ -1096,7 +1096,7 @@ class Renderer {
       const warnPulse = 0.6 + 0.4 * Math.sin(Date.now() / 300);
       ctx.globalAlpha = warnPulse;
     }
-    ctx.font = 'bold 10px ' + APPLE_FONT;
+    ctx.font = 'bold 12px ' + APPLE_FONT;
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
     // 深色描边（确保任何背景下文字都清晰）
@@ -1308,14 +1308,14 @@ class Renderer {
           const ah = 30; // 高度统一：24→30
           const ay = subY + Math.max(0, (L.titleTitleSize - ah) / 2); // y位置与其他按钮一致
           this.roundRect(actX, ay, actAW, ah, ah / 2); ctx.fill();
-          ctx.strokeStyle = 'rgba(255,255,255,0.6)'; ctx.lineWidth = 1;
+          ctx.strokeStyle = UI.color.ink.body; ctx.lineWidth = 1;
           this.roundRect(actX + 0.5, ay + 0.5, actAW - 1, ah - 1, ah / 2 - 0.5); ctx.stroke();
           ctx.fillStyle = '#fff';
           ctx.font = 'bold 12px ' + APPLE_FONT; // 主文字调大：11→12
           ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
           ctx.fillText(actTxt, actX + actAW / 2, ay + ah / 2 - 4);
           ctx.fillStyle = '#ffd54f';
-          ctx.font = 'bold 10px ' + APPLE_FONT; // 副文字调大：8→10
+          ctx.font = 'bold 12px ' + APPLE_FONT; // 副文字调大：8→10
           ctx.fillText(actSub, actX + actAW / 2, ay + ah / 2 + 8);
           ctx.restore();
         }
@@ -1365,7 +1365,7 @@ class Renderer {
         this.roundRect(lvBtnX + 0.6, lvBtnY + 0.6, lvBtnW - 1.2, lvBtnH - 1.2, lvBtnH / 2 - 0.6); ctx.stroke();
         // LV 徽章（大写，文字调大：9px → 11px）
         ctx.fillStyle = '#ffd54f';
-        ctx.font = 'bold 11px ' + APPLE_FONT;
+        ctx.font = 'bold 12px ' + APPLE_FONT;
         ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
         ctx.fillText('LV', lvBtnX + 17, lvBtnY + lvBtnH / 2);
         // 等级数字（调大：13px → 15px，位置右移）
@@ -1397,7 +1397,7 @@ class Renderer {
       });
       ctx.fillStyle = dg;
       this.roundRect(tBtnX, tBtnY, tBtnW, tBtnH, tBtnH / 2); ctx.fill();
-      ctx.strokeStyle = 'rgba(255,255,255,0.55)';
+      ctx.strokeStyle = UI.color.ink.body;
       ctx.lineWidth = 1;
       this.roundRect(tBtnX + 0.5, tBtnY + 0.5, tBtnW - 1, tBtnH - 1, tBtnH / 2 - 0.5); ctx.stroke();
       this._drawPngIcon('task', tBtnX + 13, tBtnY + tBtnH / 2, 16);
@@ -1455,7 +1455,7 @@ class Renderer {
     });
     ctx.fillStyle = dg;
     this.roundRect(tBtnX, tabY, tBtnW, tBtnH, tBtnH / 2); ctx.fill();
-    ctx.strokeStyle = 'rgba(255,255,255,0.55)';
+    ctx.strokeStyle = UI.color.ink.body;
     ctx.lineWidth = 1;
     this.roundRect(tBtnX + 0.5, tabY + 0.5, tBtnW - 1, tBtnH - 1, tBtnH / 2 - 0.5); ctx.stroke();
     this._drawPngIcon('task', tBtnX + 13, tabY + tBtnH / 2, 15);
@@ -1720,7 +1720,7 @@ class Renderer {
         ctx.stroke();
         ctx.globalAlpha = 1;
         ctx.fillStyle = 'rgba(255,213,79,' + (0.55 + 0.35 * pulse) + ')';
-        ctx.font = 'bold 11px ' + APPLE_FONT;
+        ctx.font = 'bold 12px ' + APPLE_FONT;
         ctx.textAlign = 'center';
         ctx.textBaseline = 'middle';
         ctx.fillText('可合成', sx, sy - slotR * 0.55);
@@ -1761,7 +1761,7 @@ class Renderer {
       } else if (!this.game.tutorialDone && this.game.inventory.length > 0) {
         // 新手期空槽提示：轻量"拖入"引导（仅教学未完成且有库存时）
         ctx.fillStyle = 'rgba(255,255,255,0.35)';
-        ctx.font = '11px ' + APPLE_FONT;
+        ctx.font = '12px ' + APPLE_FONT;
         ctx.textAlign = 'center';
         ctx.textBaseline = 'middle';
         ctx.fillText('拖入', sx, sy);
@@ -1854,7 +1854,7 @@ class Renderer {
       if (remain <= 2) {
         ctx.save();
         ctx.fillStyle = '#ffd54f';
-        ctx.font = 'bold 10px ' + APPLE_FONT;
+        ctx.font = 'bold 12px ' + APPLE_FONT;
         ctx.textAlign = 'center';
         ctx.textBaseline = 'middle';
         ctx.fillText('保底 ' + remain + ' 抽', drawRect.x + drawRect.w / 2, drawRect.y + drawRect.h - 9);
@@ -2005,7 +2005,7 @@ class Renderer {
       if (remain <= 2) {
         ctx.save();
         ctx.fillStyle = '#ffd54f';
-        ctx.font = 'bold 10px ' + APPLE_FONT;
+        ctx.font = 'bold 12px ' + APPLE_FONT;
         ctx.textAlign = 'center';
         ctx.textBaseline = 'middle';
         ctx.fillText('保底 ' + remain + ' 抽', drawRect.x + drawRect.w / 2, drawRect.y + drawRect.h - 9);
@@ -2110,7 +2110,7 @@ class Renderer {
     const cx = ex + ew / 2;
     const cy = ey - 14;
     // 中央：3 个灰色虚线圆环「空槽位」（暗示这里将放置陀螺）
-    ctx.strokeStyle = 'rgba(255,255,255,0.16)';
+    ctx.strokeStyle = UI.color.ink.line;
     ctx.lineWidth = 1.5;
     ctx.setLineDash([5, 6]);
     for (let i = -1; i <= 1; i++) {
@@ -2131,7 +2131,7 @@ class Renderer {
     ctx.fillText(emptyAll ? '背包空空的，去抽卡获得陀螺吧' : '该品质还没有陀螺', cx, cy + 50);
     // 副文案
     ctx.fillStyle = 'rgba(255,255,255,0.42)';
-    ctx.font = '11px ' + APPLE_FONT;
+    ctx.font = '12px ' + APPLE_FONT;
     ctx.fillText(emptyAll ? '消耗能量抽卡 · 集齐 25 款图鉴' : '试试其它品质标签', cx, cy + 68);
     ctx.restore();
   }
@@ -2167,7 +2167,7 @@ class Renderer {
       ctx.save();
       ctx.shadowColor = 'rgba(0,0,0,0.25)';
       ctx.shadowBlur = 3 * this.shadowScale;
-      ctx.fillStyle = 'rgba(255,255,255,0.06)';
+      ctx.fillStyle = UI.color.ink.faint;
       ctx.strokeStyle = bb.tier.color;
       ctx.lineWidth = 1.5;
       this.roundRect(x, y, cell, cell, Math.max(8, Math.min(12, cell / 5)));
@@ -2187,7 +2187,7 @@ class Renderer {
       const gridRightX = startX + cols * cell + (cols - 1) * gap;
       const pY = L.invMaxBottom - pH - 2;
       const midText = (page + 1) + '/' + totalPages;
-      ctx.font = 'bold 11px ' + APPLE_FONT;
+      ctx.font = 'bold 12px ' + APPLE_FONT;
       const midW = mtW(ctx, midText) + 18;
       const pagerW = chevW * 2 + midW + padX * 4;
       const pX = gridRightX - pagerW;
@@ -2372,7 +2372,7 @@ class Renderer {
       Math.max(0.3, r.w / 100), { maxSize: r.w * 0.88, uniformSize: true });
     // 品质名
     ctx.fillStyle = color;
-    ctx.font = 'bold 10px ' + APPLE_FONT;
+    ctx.font = 'bold 12px ' + APPLE_FONT;
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
     ctx.fillText(tier.name || '', r.x + r.w / 2, r.y + r.h - 14);
@@ -2380,7 +2380,7 @@ class Renderer {
     ctx.fillStyle = 'rgba(0,0,0,0.5)';
     this.roundRect(r.x + 4, r.y + 4, 28, 15, 7); ctx.fill();
     ctx.fillStyle = '#ffd54f';
-    ctx.font = 'bold 10px ' + APPLE_FONT;
+    ctx.font = 'bold 12px ' + APPLE_FONT;
     ctx.fillText('Lv' + (bb.level || 1), r.x + 18, r.y + 12);
     ctx.restore();
   }
@@ -2390,7 +2390,7 @@ class Renderer {
     const ctx = this.ctx;
     ctx.save();
     ctx.globalAlpha = enabled ? 1 : 0.32;
-    ctx.fillStyle = enabled ? 'rgba(255,255,255,0.16)' : 'rgba(255,255,255,0.06)';
+    ctx.fillStyle = enabled ? UI.color.ink.line : UI.color.ink.faint;
     ctx.strokeStyle = enabled ? 'rgba(255,255,255,0.40)' : 'rgba(255,255,255,0.18)';
     ctx.lineWidth = 1;
     this.roundRect(rect.x, rect.y, rect.w, rect.h, rect.h / 2); ctx.fill(); ctx.stroke();
@@ -2474,8 +2474,8 @@ class Renderer {
       ctx.fillStyle = pg;
       this.roundRect(pX, pY, Math.max(5, pW * pct), 5, 2.5); ctx.fill();
     }
-    ctx.fillStyle = 'rgba(255,255,255,0.55)';
-    ctx.font = '10px ' + APPLE_FONT;
+    ctx.fillStyle = UI.color.ink.body;
+    ctx.font = '12px ' + APPLE_FONT;
     ctx.fillText(Math.floor(pct * 100) + '%', W / 2 + pW / 2 + 6, pY - 2);
 
     // 阶段奖励横幅（收集 5/10/15/20 档发大奖）下移到底部细条，给顶部留呼吸感
@@ -2524,7 +2524,7 @@ class Renderer {
       // 神兽名和收集进度一行显示："青龙 1/5"，集齐时显示"白虎 集齐"
       const badgeText = rowDone ? (tierNames[t] + ' 集齐') : (tierNames[t] + ' ' + rowCnt + '/5');
       ctx.fillStyle = tierTextColor;
-      ctx.font = 'bold 11px ' + APPLE_FONT;
+      ctx.font = 'bold 12px ' + APPLE_FONT;
       ctx.textAlign = 'center';
       ctx.textBaseline = 'middle';
       // 文字描边确保在任何背景上都可见
@@ -2626,12 +2626,12 @@ class Renderer {
     } else {
       // 已领完 / 未达：进度提示条
       const doneAll = claimed >= 20;
-      ctx.fillStyle = 'rgba(255,255,255,0.06)';
+      ctx.fillStyle = UI.color.ink.faint;
       this.roundRect(bX, bY, bW, bH, bH / 2); ctx.fill();
       ctx.strokeStyle = 'rgba(255,255,255,0.14)'; ctx.lineWidth = 1;
       this.roundRect(bX + 0.5, bY + 0.5, bW - 1, bH - 1, bH / 2); ctx.stroke();
-      ctx.fillStyle = doneAll ? '#ffd54f' : 'rgba(255,255,255,0.55)';
-      ctx.font = 'bold 11px ' + APPLE_FONT;
+      ctx.fillStyle = doneAll ? '#ffd54f' : UI.color.ink.body;
+      ctx.font = 'bold 12px ' + APPLE_FONT;
       ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
       if (doneAll) {
         ctx.fillText('全图鉴·大师 限定皮肤已解锁', W / 2, bY + bH / 2);
@@ -2874,7 +2874,7 @@ class Renderer {
     ctx.scale(1 - pressT * 0.08, 1 - pressT * 0.08);
     ctx.translate(-cx, -cy);
     ctx.fillStyle = pressed ? 'rgba(0,0,0,0.55)' : 'rgba(0,0,0,0.38)';
-    ctx.strokeStyle = pressed ? 'rgba(255,255,255,0.55)' : UI.icon.stroke;   // ③3-3 统一描边（令牌）
+    ctx.strokeStyle = pressed ? UI.color.ink.body : UI.icon.stroke;   // ③3-3 统一描边（令牌）
     ctx.lineWidth = UI.icon.weight;   // ③3-3 统一描边粗细
     this.roundRect(rect.x, rect.y, rect.w, rect.h, radius); ctx.fill(); ctx.stroke();
     const pad = Math.max(4, rect.h * 0.16);
@@ -3211,8 +3211,8 @@ class Renderer {
     ctx.shadowOffsetY = 4 * this.shadowScale;
     const bg = this._grad('tut|' + Math.round(bx) + '|' + Math.round(by) + '|' + Math.round(bh), () => {
       const gg = ctx.createLinearGradient(bx, by, bx, by + bh);
-      gg.addColorStop(0, 'rgba(255,255,255,0.16)');
-      gg.addColorStop(1, 'rgba(255,255,255,0.06)');
+      gg.addColorStop(0, UI.color.ink.line);
+      gg.addColorStop(1, UI.color.ink.faint);
       return gg;
     });
     ctx.fillStyle = bg;
@@ -3224,7 +3224,7 @@ class Renderer {
     this.roundRect(bx + 0.75, by + 0.75, bw - 1.5, bh - 1.5, 18); ctx.stroke();
     const hl = this._grad('tuthl|' + Math.round(bx), () => {
       const gg = ctx.createLinearGradient(bx + 10, by, bx + 10, by + 12);
-      gg.addColorStop(0, 'rgba(255,255,255,0.6)');
+      gg.addColorStop(0, UI.color.ink.body);
       gg.addColorStop(1, 'rgba(255,255,255,0)');
       return gg;
     });
@@ -3253,7 +3253,7 @@ class Renderer {
     ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
     ctx.fillText(titles[step], icoX + icoR + 12, icoY);
     ctx.font = '13px ' + APPLE_FONT;
-    ctx.fillStyle = 'rgba(255,255,255,0.85)';
+    ctx.fillStyle = UI.color.ink.bright;
     const lines = tips[step].split('\n');
     for (let i = 0; i < lines.length; i++) {
       ctx.fillText(lines[i], bx + 24, by + 66 + i * 20);
@@ -3267,7 +3267,7 @@ class Renderer {
     ctx.strokeStyle = 'rgba(255,255,255,0.4)';
     ctx.lineWidth = 1;
     this.roundRect(skip.x + 0.5, skip.y + 0.5, skip.w - 1, skip.h - 1, 14); ctx.stroke();
-    ctx.fillStyle = 'rgba(255,255,255,0.85)';
+    ctx.fillStyle = UI.color.ink.bright;
     ctx.font = '12px ' + APPLE_FONT;
     ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
     ctx.fillText('跳过', skip.x + skip.w / 2, skip.y + skip.h / 2 + 1);
@@ -3383,7 +3383,7 @@ class Renderer {
       ctx.font = 'bold 30px ' + APPLE_FONT;
       // 图标资产 v3：卡背星芒 ✦ → icon-sparkle.png
       this._drawPngIcon('sparkle', 0, -22, 34);
-      ctx.fillStyle = 'rgba(255,255,255,0.85)';
+      ctx.fillStyle = UI.color.ink.bright;
       ctx.font = 'bold 18px ' + APPLE_FONT;
       ctx.fillText('陀螺抽卡', 0, 28);
       ctx.fillStyle = 'rgba(255,255,255,0.45)';
@@ -3457,8 +3457,8 @@ class Renderer {
     ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
     ctx.fillText('确认出售', w / 2, by + 36);
     // 警告副标题
-    ctx.fillStyle = 'rgba(255,255,255,0.6)';
-    ctx.font = '11px ' + APPLE_FONT;
+    ctx.fillStyle = UI.color.ink.body;
+    ctx.font = '12px ' + APPLE_FONT;
     ctx.fillText('出售后陀螺将消失，无法恢复', w / 2, by + 58);
 
     // 陀螺预览
@@ -3474,7 +3474,7 @@ class Renderer {
     ctx.fillStyle = '#ffd54f';
     ctx.font = 'bold 16px ' + APPLE_FONT;
     if (!this._drawPngIcon('coin', w / 2 - 30, by + bh - 68, 16)) {
-      drawVectorIcon(ctx, 'coin', w / 2 - 30, by + bh - 68, 16, '#FFD700');
+      drawVectorIcon(ctx, 'coin', w / 2 - 30, by + bh - 68, 16, '#ffd54f');
     }
     ctx.fillText('+' + sc.gain + ' 金币', w / 2 + 10, by + bh - 68);
 
@@ -3549,7 +3549,7 @@ class Renderer {
       } else if (isToday) {
         ctx.fillStyle = 'rgba(255,213,79,0.22)';
       } else {
-        ctx.fillStyle = 'rgba(255,255,255,0.06)';
+        ctx.fillStyle = UI.color.ink.faint;
       }
       this.roundRect(p.x, p.y, cellW, cellH, 12); ctx.fill();
 
@@ -3569,7 +3569,7 @@ class Renderer {
       ctx.fillStyle = '#fff'; ctx.font = 'bold 12px ' + APPLE_FONT;
       ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
       ctx.fillText('第' + d + '天', p.x + cellW / 2, p.y + 14);
-      ctx.fillStyle = '#ffd54f'; ctx.font = 'bold 11px ' + APPLE_FONT;
+      ctx.fillStyle = '#ffd54f'; ctx.font = 'bold 12px ' + APPLE_FONT;
       const rewardType = r.beyblade ? 'beyblade' : (r.freeDraw ? 'freeDraw' : (r.coins ? 'coin' : 'bolt'));
       const rewardVal = r.beyblade ? '' : (r.freeDraw ? '抽卡×' + r.freeDraw : (r.coins ? '+' + r.coins : '+' + r.energy));
       if (rewardType === 'beyblade') {
@@ -3584,7 +3584,7 @@ class Renderer {
         const icoS = 13;
         const icoX = p.x + cellW / 2 - (icoS + mtW(ctx, rewardVal)) / 2;
         if (!this._drawPngIcon('drawcard', icoX + icoS / 2, p.y + 34, icoS)) {
-          drawVectorIcon(ctx, 'coin', icoX + icoS / 2, p.y + 34, icoS, '#FFD700');
+          drawVectorIcon(ctx, 'coin', icoX + icoS / 2, p.y + 34, icoS, '#ffd54f');
         }
         ctx.textAlign = 'left';
         ctx.fillText(rewardVal, icoX + icoS + 2, p.y + 34);
@@ -3599,7 +3599,7 @@ class Renderer {
         // 奖励图标：coin→金币 PNG / bolt→能量 PNG
         const rwKey = rewardType === 'bolt' ? 'energy' : 'coin';
         if (!this._drawPngIcon(rwKey, icoX + icoS / 2, p.y + 34, icoS)) {
-          drawVectorIcon(ctx, rewardType, icoX + icoS / 2, p.y + 34, icoS, '#FFD700');
+          drawVectorIcon(ctx, rewardType, icoX + icoS / 2, p.y + 34, icoS, '#ffd54f');
         }
         ctx.textAlign = 'left';
         ctx.fillText(rewardVal, icoX + icoS + 2, p.y + 34);
@@ -3607,22 +3607,22 @@ class Renderer {
       }
       // 状态：已签 ✓ / 今日可领 / 未解锁 / 大奖角标
       if (isLegend) {
-        ctx.fillStyle = '#ffd54f'; ctx.font = 'bold 10px ' + APPLE_FONT;
+        ctx.fillStyle = '#ffd54f'; ctx.font = 'bold 12px ' + APPLE_FONT;
         // 图标资产 v3：★大奖 → icon-star + 大奖
         ctx.fillText('大奖', p.x + cellW / 2 + 8, p.y + 50);
         this._drawPngIcon('star', p.x + cellW / 2 - 15, p.y + 50, 13);
       } else if (signed) {
         if (!this._drawPngIcon('check', p.x + cellW / 2, p.y + 50, 14)) drawVectorIcon(ctx, 'check', p.x + cellW / 2, p.y + 50, 14, '#00e676');
       }
-      else if (isToday) { ctx.fillStyle = '#ffd54f'; ctx.font = '11px ' + APPLE_FONT; ctx.fillText('可领', p.x + cellW / 2, p.y + 50); }
-      else { ctx.fillStyle = 'rgba(255,255,255,0.40)'; ctx.font = '11px ' + APPLE_FONT; ctx.fillText('未解锁', p.x + cellW / 2, p.y + 50); }
+      else if (isToday) { ctx.fillStyle = '#ffd54f'; ctx.font = '12px ' + APPLE_FONT; ctx.fillText('可领', p.x + cellW / 2, p.y + 50); }
+      else { ctx.fillStyle = 'rgba(255,255,255,0.40)'; ctx.font = '12px ' + APPLE_FONT; ctx.fillText('未解锁', p.x + cellW / 2, p.y + 50); }
     }
 
     // 明日预告行
     const tomorrowDay = (todayDay % 7) + 1;
     const tr = SIGN_REWARDS[tomorrowDay - 1];
     const prevY = by + 224, prevH = 30;
-    ctx.fillStyle = 'rgba(255,255,255,0.07)';
+    ctx.fillStyle = UI.color.ink.faint;
     this.roundRect(bx + 16, prevY, bw - 32, prevH, 15); ctx.fill();
     ctx.strokeStyle = 'rgba(255,213,79,0.35)'; ctx.lineWidth = 1;
     this.roundRect(bx + 16.5, prevY + 0.5, bw - 33, prevH - 1, 15); ctx.stroke();
@@ -3683,7 +3683,7 @@ class Renderer {
     ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
     ctx.fillText('每日挑战', w / 2, by + 34);
     ctx.fillStyle = 'rgba(209,196,233,0.92)';
-    ctx.font = '11px ' + APPLE_FONT;
+    ctx.font = '12px ' + APPLE_FONT;
     ctx.fillText('对战 3 局 · 合成 3 次 · 抽卡 3 次', w / 2, by + 58);
 
     // 3 个任务行
@@ -3693,9 +3693,9 @@ class Renderer {
       const m = meta[i];
       const done = m.cur >= m.goal;
       // 行底
-      ctx.fillStyle = done ? 'rgba(255,213,79,0.12)' : 'rgba(255,255,255,0.07)';
+      ctx.fillStyle = done ? 'rgba(255,213,79,0.12)' : UI.color.ink.faint;
       this.roundRect(rowX, ry, rowW, rowH, 12); ctx.fill();
-      ctx.strokeStyle = done ? 'rgba(255,213,79,0.5)' : 'rgba(255,255,255,0.16)';
+      ctx.strokeStyle = done ? 'rgba(255,213,79,0.5)' : UI.color.ink.line;
       ctx.lineWidth = 1;
       this.roundRect(rowX + 0.5, ry + 0.5, rowW - 1, rowH - 1, 12); ctx.stroke();
       // 图标
@@ -3724,14 +3724,14 @@ class Renderer {
         this.roundRect(barX, barY, Math.max(6, barW * p), barH, barH / 2); ctx.fill();
       }
       ctx.fillStyle = done ? '#ffd54f' : 'rgba(255,255,255,0.75)';
-      ctx.font = 'bold 10px ' + APPLE_FONT;
+      ctx.font = 'bold 12px ' + APPLE_FONT;
       ctx.fillText(m.cur + '/' + m.goal, barX + barW + 6, ry + rowH / 2 + 6);
       // 完成态 / 活跃度标签（右侧）
       if (done) {
         if (!this._drawPngIcon('check', rowX + rowW - 22, ry + rowH / 2, 18)) drawVectorIcon(ctx, 'check', rowX + rowW - 22, ry + rowH / 2, 18, '#00e676');
       } else {
         ctx.fillStyle = '#ffd54f';
-        ctx.font = 'bold 10px ' + APPLE_FONT;
+        ctx.font = 'bold 12px ' + APPLE_FONT;
         ctx.textAlign = 'right';
         ctx.fillText('+' + m.active + ' 活跃', rowX + rowW - 12, ry + rowH / 2);
         ctx.textAlign = 'left';
@@ -3741,7 +3741,7 @@ class Renderer {
 
     // 活跃度区
     const ay = ry + 2;
-    ctx.fillStyle = 'rgba(255,255,255,0.07)';
+    ctx.fillStyle = UI.color.ink.faint;
     this.roundRect(rowX, ay, rowW, 56, 12); ctx.fill();
     ctx.fillStyle = '#fff';
     ctx.font = 'bold 12px ' + APPLE_FONT;
@@ -3752,7 +3752,7 @@ class Renderer {
     ctx.fillText(active + ' / 100', rowX + rowW - 16, ay + 18);
     // 活跃度进度条
     const aBarX = rowX + 16, aBarW = rowW - 32, aBarY = ay + 32, aBarH = 10;
-    ctx.fillStyle = 'rgba(255,255,255,0.16)';
+    ctx.fillStyle = UI.color.ink.line;
     this.roundRect(aBarX, aBarY, aBarW, aBarH, aBarH / 2); ctx.fill();
     if (active > 0) {
       const ag = this._grad('dact|' + Math.round(aBarX), () => {
@@ -3769,9 +3769,9 @@ class Renderer {
 
     // 当日宝箱
     const chestY = ay + 68;
-    ctx.fillStyle = 'rgba(255,255,255,0.07)';
+    ctx.fillStyle = UI.color.ink.faint;
     this.roundRect(rowX, chestY, rowW, 62, 12); ctx.fill();
-    ctx.strokeStyle = chestReady ? 'rgba(255,213,79,0.7)' : 'rgba(255,255,255,0.16)';
+    ctx.strokeStyle = chestReady ? 'rgba(255,213,79,0.7)' : UI.color.ink.line;
     ctx.lineWidth = 1.5;
     this.roundRect(rowX + 0.75, chestY + 0.75, rowW - 1.5, 62 - 1.5, 12); ctx.stroke();
     // 宝箱图标
@@ -3782,8 +3782,8 @@ class Renderer {
     ctx.font = 'bold 12px ' + APPLE_FONT;
     ctx.textAlign = 'left';
     ctx.fillText(chestClaimed ? '今日宝箱已领取' : (chestReady ? '宝箱可开启！' : '活跃满 100 开启当日宝箱'), rowX + 62, chestY + 20);
-    ctx.fillStyle = 'rgba(255,255,255,0.6)';
-    ctx.font = '10px ' + APPLE_FONT;
+    ctx.fillStyle = UI.color.ink.body;
+    ctx.font = '12px ' + APPLE_FONT;
     ctx.fillText(chestClaimed ? '明日 5:00 刷新' : '随机 金币 / 能量 / 稀有陀螺', rowX + 62, chestY + 40);
     // 领取按钮
     const cBtnW = 74, cBtnH = 34;
@@ -3816,7 +3816,7 @@ class Renderer {
     ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
     ctx.fillText('竞技场天梯', w / 2, by + 34);
     ctx.fillStyle = 'rgba(209,196,233,0.92)';
-    ctx.font = '11px ' + APPLE_FONT;
+    ctx.font = '12px ' + APPLE_FONT;
     ctx.fillText('周赛 · 每局胜利得竞技积分 · 周结算发段位奖励', w / 2, by + 58);
 
     // 当前段位区
@@ -3837,15 +3837,15 @@ class Renderer {
     ctx.font = 'bold 18px ' + APPLE_FONT;
     ctx.fillText(meta.tierName + '段位', bx + 106, tierY - 12);
     ctx.fillStyle = 'rgba(255,255,255,0.78)';
-    ctx.font = '11px ' + APPLE_FONT;
+    ctx.font = '12px ' + APPLE_FONT;
     if (isMaster) {
       ctx.fillText('巅峰大师 · 专属金辉称号', bx + 106, tierY + 8);
     } else {
       ctx.fillText('距 ' + meta.nextName + ' 还需 ' + meta.toNext + ' 积分', bx + 106, tierY + 8);
     }
     // 赛季剩余
-    ctx.fillStyle = 'rgba(255,255,255,0.6)';
-    ctx.font = '10px ' + APPLE_FONT;
+    ctx.fillStyle = UI.color.ink.body;
+    ctx.font = '12px ' + APPLE_FONT;
     ctx.fillText('赛季剩余 ' + meta.remainDays + ' 天', bx + 106, tierY + 26);
 
     // 积分进度条（青铜→大师）
@@ -3872,12 +3872,12 @@ class Renderer {
       ctx.fillStyle = i <= meta.tierIndex ? '#ffd54f' : 'rgba(255,255,255,0.4)';
       ctx.beginPath(); ctx.arc(tx, pBarY + pBarH / 2, 3, 0, Math.PI * 2); ctx.fill();
     }
-    ctx.fillStyle = 'rgba(255,255,255,0.85)';
-    ctx.font = 'bold 11px ' + APPLE_FONT;
+    ctx.fillStyle = UI.color.ink.bright;
+    ctx.font = 'bold 12px ' + APPLE_FONT;
     ctx.textAlign = 'center';
     ctx.fillText('竞技积分 ' + meta.pts + ' / ' + maxPts, bx + bw / 2, pBarY + pBarH + 16);
-    ctx.fillStyle = 'rgba(255,255,255,0.6)';
-    ctx.font = '10px ' + APPLE_FONT;
+    ctx.fillStyle = UI.color.ink.body;
+    ctx.font = '12px ' + APPLE_FONT;
     ctx.fillText('本周最高分 ' + meta.best, bx + bw / 2, pBarY + pBarH + 30);
 
     // 段位奖励表（6 档横向徽章）
@@ -3897,12 +3897,12 @@ class Renderer {
       // 段位图标
       if (reached) this._drawPngIcon(t2.icon, tx, rY + 22, 26);
       else {
-        ctx.fillStyle = 'rgba(255,255,255,0.16)';
+        ctx.fillStyle = UI.color.ink.line;
         ctx.beginPath(); ctx.arc(tx, rY + 22, 12, 0, Math.PI * 2); ctx.fill();
       }
       // 段位名
       ctx.fillStyle = reached ? (t2.color || '#ffd54f') : 'rgba(255,255,255,0.4)';
-      ctx.font = 'bold 10px ' + APPLE_FONT;
+      ctx.font = 'bold 12px ' + APPLE_FONT;
       ctx.fillText(t2.name, tx, rY + 42);
       // 奖励
       ctx.fillStyle = reached ? 'rgba(255,255,255,0.8)' : 'rgba(255,255,255,0.32)';
@@ -3914,10 +3914,10 @@ class Renderer {
     }
     // 说明条
     const tipY = rY + cellH + 8;
-    ctx.fillStyle = 'rgba(255,255,255,0.07)';
+    ctx.fillStyle = UI.color.ink.faint;
     this.roundRect(bx + 16, tipY, bw - 32, 26, 13); ctx.fill();
-    ctx.fillStyle = 'rgba(255,255,255,0.6)';
-    ctx.font = '10px ' + APPLE_FONT;
+    ctx.fillStyle = UI.color.ink.body;
+    ctx.font = '12px ' + APPLE_FONT;
     ctx.textAlign = 'center';
     // P2-7 赛季荣耀：说明行合并展示历史最高段位 + 大师限定进度
     const _pk = (typeof this.game.arenaPeakMeta === 'function') ? this.game.arenaPeakMeta() : { peakName: '', masterGranted: false };
@@ -3949,13 +3949,13 @@ class Renderer {
     ctx.strokeStyle = act.weekendDouble ? 'rgba(255,213,79,0.5)' : 'rgba(255,255,255,0.12)';
     ctx.lineWidth = 1;
     this.roundRect(bx + 16.5, yW + 0.5, bw - 33, 39, 12); ctx.stroke();
-    ctx.fillStyle = act.weekendDouble ? '#ffd54f' : 'rgba(255,255,255,0.55)';
+    ctx.fillStyle = act.weekendDouble ? '#ffd54f' : UI.color.ink.body;
     ctx.font = 'bold 12px ' + APPLE_FONT;
     ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
     if (act.weekendDouble) {
       ctx.fillText('⚔ 激斗周末 · BOSS 积分×2 · 洗词条半价', bx + 28, yW + 14);
-      ctx.fillStyle = 'rgba(255,255,255,0.6)';
-      ctx.font = '10px ' + APPLE_FONT;
+      ctx.fillStyle = UI.color.ink.body;
+      ctx.font = '12px ' + APPLE_FONT;
       const wm = (typeof this.game.weekendShopMeta === 'function') ? this.game.weekendShopMeta() : { remainDays: 0 };
       ctx.fillText('限时商店剩余 ' + wm.remainDays + ' 天 · 周一刷新限购', bx + 28, yW + 29);
       const wsb = { x: bx + bw - 16 - 92, y: yW + 5, w: 92, h: 30, action: 'weekshop' };
@@ -3987,7 +3987,7 @@ class Renderer {
     ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
     ctx.fillText('激斗周末 · 限时商店', w / 2, by + 34);
     ctx.fillStyle = 'rgba(209,196,233,0.9)';
-    ctx.font = '11px ' + APPLE_FONT;
+    ctx.font = '12px ' + APPLE_FONT;
     ctx.fillText(meta.weekend ? ('周末限定 · 剩 ' + meta.remainDays + ' 天 · 周一刷新限购') : '周五-周日开放（当前为预览）', w / 2, by + 58);
     ctx.fillStyle = '#ffd54f';
     ctx.font = 'bold 12px ' + APPLE_FONT;
@@ -4000,7 +4000,7 @@ class Renderer {
       const soldOut = it.bought >= it.limit;
       const afford = (this.game.coins || 0) >= it.cost;
       const canBuy = meta.weekend && !soldOut && afford;
-      ctx.fillStyle = 'rgba(255,255,255,0.07)';
+      ctx.fillStyle = UI.color.ink.faint;
       this.roundRect(cardX, cy, cardW, cardH, 12); ctx.fill();
       ctx.strokeStyle = canBuy ? 'rgba(255,213,79,0.35)' : 'rgba(255,255,255,0.12)';
       ctx.lineWidth = 1;
@@ -4019,7 +4019,7 @@ class Renderer {
       ctx.textAlign = 'left';
       ctx.fillText(it.name, cardX + 56, cy + 24);
       ctx.fillStyle = 'rgba(255,255,255,0.65)';
-      ctx.font = '11px ' + APPLE_FONT;
+      ctx.font = '12px ' + APPLE_FONT;
       ctx.fillText(it.desc, cardX + 56, cy + 44);
       ctx.fillStyle = soldOut ? '#ff8a80' : 'rgba(255,255,255,0.5)';
       ctx.fillText('本周已购 ' + it.bought + '/' + it.limit, cardX + 56, cy + 64);
@@ -4057,14 +4057,14 @@ class Renderer {
     ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
     ctx.fillText('福利中心', w / 2, by + 36);
     ctx.fillStyle = 'rgba(209,196,233,0.9)';
-    ctx.font = '11px ' + APPLE_FONT;
+    ctx.font = '12px ' + APPLE_FONT;
     ctx.fillText('每日签到 · 每日任务 · 好友助力，一个入口全搞定', w / 2, by + 58);
 
     const rowX = bx + 16, rowW = bw - 32, rowH = 62, gap = 10;
     for (let i = 0; i < meta.rows.length; i++) {
       const r = meta.rows[i];
       const cy = by + 82 + i * (rowH + gap);
-      ctx.fillStyle = 'rgba(255,255,255,0.06)';
+      ctx.fillStyle = UI.color.ink.faint;
       this.roundRect(rowX, cy, rowW, rowH, 12); ctx.fill();
       ctx.strokeStyle = r.due ? 'rgba(255,213,79,0.35)' : 'rgba(255,255,255,0.10)';
       ctx.lineWidth = 1;
@@ -4072,7 +4072,7 @@ class Renderer {
       // 左侧序号徽标
       ctx.fillStyle = r.due ? '#ffd54f' : 'rgba(255,255,255,0.22)';
       ctx.beginPath(); ctx.arc(rowX + 28, cy + rowH / 2, 15, 0, Math.PI * 2); ctx.fill();
-      ctx.fillStyle = r.due ? '#1a0f33' : 'rgba(255,255,255,0.6)';
+      ctx.fillStyle = r.due ? '#1a0f33' : UI.color.ink.body;
       ctx.font = 'bold 13px ' + APPLE_FONT;
       ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
       ctx.fillText(String(i + 1), rowX + 28, cy + rowH / 2 + 0.5);
@@ -4083,7 +4083,7 @@ class Renderer {
       ctx.textAlign = 'left';
       ctx.fillText(r.name, rowX + 54, cy + 26);
       ctx.fillStyle = r.due ? '#ffd54f' : 'rgba(255,255,255,0.5)';
-      ctx.font = '11px ' + APPLE_FONT;
+      ctx.font = '12px ' + APPLE_FONT;
       ctx.fillText(r.sub, rowX + 54, cy + 46);
       // 红点（可领）
       if (r.due) {
@@ -4127,7 +4127,7 @@ class Renderer {
     ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
     ctx.fillText('大师等级', w / 2, by + 34);
     ctx.fillStyle = 'rgba(209,196,233,0.92)';
-    ctx.font = '11px ' + APPLE_FONT;
+    ctx.font = '12px ' + APPLE_FONT;
     ctx.fillText('对战 / 合成 / 抽卡都能积累经验', w / 2, by + 58);
 
     // 等级大徽章
@@ -4137,7 +4137,7 @@ class Renderer {
     ctx.strokeStyle = '#ffd54f'; ctx.lineWidth = 2;
     ctx.beginPath(); ctx.arc(bx + 62, lvY, 34, 0, Math.PI * 2); ctx.stroke();
     ctx.fillStyle = '#ffd54f';
-    ctx.font = 'bold 10px ' + APPLE_FONT;
+    ctx.font = 'bold 12px ' + APPLE_FONT;
     ctx.textAlign = 'center';
     ctx.fillText('Lv', bx + 62, lvY - 12);
     ctx.font = 'bold 28px ' + APPLE_FONT;
@@ -4149,7 +4149,7 @@ class Renderer {
     ctx.font = 'bold 16px ' + APPLE_FONT;
     ctx.fillText('陀螺大师 Lv.' + lm.level, bx + 110, lvY - 10);
     ctx.fillStyle = 'rgba(255,255,255,0.7)';
-    ctx.font = '11px ' + APPLE_FONT;
+    ctx.font = '12px ' + APPLE_FONT;
     ctx.fillText('能量上限 ' + lm.cap + ' · 每升一级 +5', bx + 110, lvY + 12);
 
     // 经验进度条
@@ -4169,8 +4169,8 @@ class Renderer {
     }
     ctx.strokeStyle = 'rgba(255,255,255,0.3)'; ctx.lineWidth = 1;
     this.roundRect(pBarX + 0.5, pBarY + 0.5, pBarW - 1, pBarH - 1, pBarH / 2); ctx.stroke();
-    ctx.fillStyle = 'rgba(255,255,255,0.85)';
-    ctx.font = 'bold 11px ' + APPLE_FONT;
+    ctx.fillStyle = UI.color.ink.bright;
+    ctx.font = 'bold 12px ' + APPLE_FONT;
     ctx.textAlign = 'center';
     ctx.fillText(lm.inLv + ' / ' + lm.need + ' 经验', bx + bw / 2, pBarY + pBarH + 16);
 
@@ -4199,16 +4199,16 @@ class Renderer {
       ctx.fillStyle = reached ? '#fff' : 'rgba(255,255,255,0.45)';
       ctx.font = 'bold 12px ' + APPLE_FONT;
       ctx.fillText('Lv.' + m.lv, bx + 52, yy + 7);
-      ctx.fillStyle = reached ? 'rgba(255,255,255,0.85)' : 'rgba(255,255,255,0.45)';
-      ctx.font = '11px ' + APPLE_FONT;
+      ctx.fillStyle = reached ? UI.color.ink.bright : 'rgba(255,255,255,0.45)';
+      ctx.font = '12px ' + APPLE_FONT;
       ctx.fillText(m.txt, bx + 96, yy + 7);
     }
     // 说明
     const tipY = mY + ms.length * 24 + 8;
-    ctx.fillStyle = 'rgba(255,255,255,0.07)';
+    ctx.fillStyle = UI.color.ink.faint;
     this.roundRect(bx + 16, tipY, bw - 32, 26, 13); ctx.fill();
-    ctx.fillStyle = 'rgba(255,255,255,0.6)';
-    ctx.font = '10px ' + APPLE_FONT;
+    ctx.fillStyle = UI.color.ink.body;
+    ctx.font = '12px ' + APPLE_FONT;
     ctx.textAlign = 'center';
     ctx.fillText('对战 +50 · 合成 +20 · 抽卡 +10 经验', bx + bw / 2, tipY + 13);
 
@@ -4236,7 +4236,7 @@ class Renderer {
     ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
     ctx.fillText(grand ? '欢迎归来 · 大礼包' : '欢迎归来', w / 2, by + 36);
     ctx.fillStyle = 'rgba(209,196,233,0.92)';
-    ctx.font = '11px ' + APPLE_FONT;
+    ctx.font = '12px ' + APPLE_FONT;
     ctx.fillText('离线 ' + hrs + ' 小时 · 专属回归福利', w / 2, by + 60);
 
     // 礼包图标
@@ -4273,12 +4273,12 @@ class Renderer {
     for (const it of items) {
       ctx.fillStyle = 'rgba(255,255,255,0.08)';
       this.roundRect(ix - itemW / 2, rY, itemW, 54, 12); ctx.fill();
-      ctx.strokeStyle = grand ? 'rgba(255,213,79,0.5)' : 'rgba(255,255,255,0.16)';
+      ctx.strokeStyle = grand ? 'rgba(255,213,79,0.5)' : UI.color.ink.line;
       ctx.lineWidth = 1;
       this.roundRect(ix - itemW / 2 + 0.5, rY + 0.5, itemW - 1, 53, 12); ctx.stroke();
       this._drawPngIcon(it.ico, ix, rY + 18, 20);
       ctx.fillStyle = '#fff';
-      ctx.font = '10px ' + APPLE_FONT;
+      ctx.font = '12px ' + APPLE_FONT;
       ctx.fillText(it.txt, ix, rY + 42);
       ix += itemW + gap;
     }
@@ -4314,7 +4314,7 @@ class Renderer {
     ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
     ctx.fillText(qNames[q], w / 2, by + 34);
     ctx.fillStyle = 'rgba(209,196,233,0.9)';
-    ctx.font = '11px ' + APPLE_FONT;
+    ctx.font = '12px ' + APPLE_FONT;
     ctx.fillText('高连击提升宝箱品质 · 内含金币/能量/陀螺', w / 2, by + 56);
 
     // 宝箱图标（金色呼吸）
@@ -4330,8 +4330,8 @@ class Renderer {
       ctx.fillText('宝', w / 2, chestY + 1);
     }
     ctx.restore();
-    ctx.fillStyle = 'rgba(255,255,255,0.6)';
-    ctx.font = '10px ' + APPLE_FONT;
+    ctx.fillStyle = UI.color.ink.body;
+    ctx.font = '12px ' + APPLE_FONT;
     ctx.fillText('剩 ' + (chest ? chest.count : 0) + ' 个', w / 2, chestY + 58);
 
     // 关闭按钮：统一圆形胶囊 + icon-close.png + 按下态（drawCloseX），与全部 9 个面板一致（P2-2/2-5 一致性）
@@ -4377,7 +4377,7 @@ class Renderer {
     ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
     ctx.fillText('好友对战 · 榜单', w / 2, by + 36);
     ctx.fillStyle = 'rgba(209,196,233,0.9)';
-    ctx.font = '11px ' + APPLE_FONT;
+    ctx.font = '12px ' + APPLE_FONT;
     ctx.fillText('真实好友排行 · 分享回跳领助力能量（每日 5 次）', w / 2, by + 58);
 
     // 助力能量按钮
@@ -4433,12 +4433,12 @@ class Renderer {
       // 兜底（Node 测试 / 旧基础库 / 开放数据域异常）：空态框
       ctx.fillStyle = 'rgba(255,255,255,0.05)';
       this.roundRect(bx + 14, boardY, bw - 28, boardH, 10); ctx.fill();
-      ctx.fillStyle = 'rgba(255,255,255,0.55)';
+      ctx.fillStyle = UI.color.ink.body;
       ctx.font = '12px ' + APPLE_FONT;
       ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
       ctx.fillText('好友榜单加载中…', w / 2, boardY + boardH / 2 - 12);
       ctx.fillStyle = 'rgba(255,255,255,0.35)';
-      ctx.font = '10px ' + APPLE_FONT;
+      ctx.font = '12px ' + APPLE_FONT;
       ctx.fillText('开发者工具不展示好友 · 请用真机预览', w / 2, boardY + boardH / 2 + 10);
     }
 
@@ -4477,7 +4477,7 @@ class Renderer {
     ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
     ctx.fillText('出击准备', w / 2, by + 36);
     ctx.fillStyle = 'rgba(209,196,233,0.9)';
-    ctx.font = '11px ' + APPLE_FONT;
+    ctx.font = '12px ' + APPLE_FONT;
     ctx.fillText('本局增益：花金币购买，能量门票 -20', w / 2, by + 60);
     ctx.fillStyle = '#ffd54f';
     ctx.font = 'bold 12px ' + APPLE_FONT;
@@ -4496,7 +4496,7 @@ class Renderer {
       const cy = cardY0 + i * (cardH + cardGap);
       const affordable = this.game.coins >= b.cost;
       // 卡片底
-      ctx.fillStyle = 'rgba(255,255,255,0.07)';
+      ctx.fillStyle = UI.color.ink.faint;
       this.roundRect(cardX, cy, cardW, cardH, 12); ctx.fill();
       ctx.strokeStyle = affordable ? 'rgba(255,213,79,0.35)' : 'rgba(255,255,255,0.12)';
       ctx.lineWidth = 1;
@@ -4514,7 +4514,7 @@ class Renderer {
       ctx.font = 'bold 14px ' + APPLE_FONT;
       ctx.fillText(b.name, cardX + 58, cy + 26);
       ctx.fillStyle = 'rgba(255,255,255,0.72)';
-      ctx.font = '10px ' + APPLE_FONT;
+      ctx.font = '12px ' + APPLE_FONT;
       ctx.fillText(b.desc, cardX + 58, cy + 46);
       // 购买按钮
       const buy = { x: cardX + cardW - 86, y: cy + cardH / 2 - 18, w: 74, h: 36, action: 'buff_buy_' + b.key };
@@ -4522,7 +4522,7 @@ class Renderer {
       this.modalRects.push(buy);
       // 成本标签（金币图标感）
       ctx.fillStyle = affordable ? 'rgba(255,213,79,0.95)' : 'rgba(255,255,255,0.4)';
-      ctx.font = 'bold 10px ' + APPLE_FONT;
+      ctx.font = 'bold 12px ' + APPLE_FONT;
       ctx.textAlign = 'center';
       ctx.fillText('金币', buy.x + buy.w / 2, buy.y - 8);
     }
@@ -4552,7 +4552,7 @@ class Renderer {
     ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
     ctx.fillText('连战 · 选择增益', w / 2, by + 36);
     ctx.fillStyle = 'rgba(178,223,219,0.9)';
-    ctx.font = '11px ' + APPLE_FONT;
+    ctx.font = '12px ' + APPLE_FONT;
     const stage = (battle && battle.runStage) || 1;
     ctx.fillText('已通关 ' + (stage - 1) + ' 关 · 选一张免费叠层，继续第 ' + stage + ' 关', w / 2, by + 60);
 
@@ -4561,7 +4561,7 @@ class Renderer {
     for (let i = 0; i < choices.length; i++) {
       const b = choices[i];
       const cy = cardY0 + i * (cardH + cardGap);
-      ctx.fillStyle = 'rgba(255,255,255,0.07)';
+      ctx.fillStyle = UI.color.ink.faint;
       this.roundRect(cardX, cy, cardW, cardH, 12); ctx.fill();
       ctx.strokeStyle = 'rgba(128,203,196,0.45)';
       ctx.lineWidth = 1;
@@ -4577,7 +4577,7 @@ class Renderer {
       ctx.font = 'bold 14px ' + APPLE_FONT;
       ctx.fillText(b.name || '', cardX + 58, cy + 26);
       ctx.fillStyle = 'rgba(255,255,255,0.72)';
-      ctx.font = '10px ' + APPLE_FONT;
+      ctx.font = '12px ' + APPLE_FONT;
       ctx.fillText(b.desc || '', cardX + 58, cy + 46);
       const pick = { x: cardX + cardW - 86, y: cy + cardH / 2 - 18, w: 74, h: 36, action: 'run_buff_' + i };
       this.drawButton(pick.x, pick.y, pick.w, pick.h, '选择', b.color || '#26a69a');
@@ -4822,7 +4822,7 @@ class Renderer {
     // BSEL·4：点选文字提示改为「只给新用户弹一次」+ 点选脉冲即时反馈
     // BSEL·5：元素绑定品质（方案B，已回退）—— 行上直接显示「克 X / 被 Y 克」
     // BSEL·6：回退到方案A（元素 = f(品质,等级)，25 种「神兽×元素」组合）—— 行只显示「元素·X」单字，克制留给战斗 HUD
-    ctx.textAlign = 'left'; ctx.font = 'bold 10px ' + APPLE_FONT;
+    ctx.textAlign = 'left'; ctx.font = 'bold 12px ' + APPLE_FONT;
     ctx.fillStyle = 'rgba(255,213,79,0.55)';
     ctx.fillText('BSEL·6', bx + 14, by + 20);
     ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
@@ -4830,7 +4830,7 @@ class Renderer {
     // 当前选中提示：优先显示面板内的待出战选择（battleSelectId），点行后立刻反映，避免"点了上面没变"
     const selIdNow = g.battleSelectId || g.battleBbId;
     const selBb = selIdNow ? g._findBbById(selIdNow) : null;
-    ctx.font = '11px ' + APPLE_FONT;
+    ctx.font = '12px ' + APPLE_FONT;
     ctx.fillStyle = 'rgba(255,213,79,0.9)';
     // 方案B（元素绑定品质）：顺带写出该陀螺的克制关系（土克水 → 麒麟克玄武），让"选哪只"有依据
     const selEl = selBb ? (selBb.elementInfo || null) : null;
@@ -4850,7 +4850,7 @@ class Renderer {
     const rowX = bx + 14, rowW = bw - 28, rowH = 80, rowGap = 8;   // P1-6：压缩行高腾出挑战券条
     const rowY0 = by + 78;
     if (list.length === 0) {
-      ctx.fillStyle = 'rgba(255,255,255,0.6)';
+      ctx.fillStyle = UI.color.ink.body;
       ctx.font = '13px ' + APPLE_FONT; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
       ctx.fillText('背包暂无陀螺', w / 2, rowY0 + 30);
       ctx.fillStyle = 'rgba(255,255,255,0.4)';
@@ -4865,7 +4865,7 @@ class Renderer {
       const isSel = (g.battleSelectId != null && g.battleSelectId === bb.id) ||
                     (!g.battleSelectId && selBb && selBb.id === bb.id);
       // 行底
-      ctx.fillStyle = isSel ? 'rgba(255,213,79,0.16)' : 'rgba(255,255,255,0.06)';
+      ctx.fillStyle = isSel ? 'rgba(255,213,79,0.16)' : UI.color.ink.faint;
       this.roundRect(rowX, cy, rowW, rowH, 12); ctx.fill();
       ctx.strokeStyle = isSel ? 'rgba(255,213,79,0.7)' : 'rgba(255,255,255,0.10)';
       ctx.lineWidth = isSel ? 2 : 1;
@@ -4887,7 +4887,7 @@ class Renderer {
       ctx.fillStyle = el.color;
       ctx.beginPath(); ctx.arc(tx + 8, cy + 64, 7, 0, Math.PI * 2); ctx.fill();
       ctx.fillStyle = '#fff';
-      ctx.font = 'bold 11px ' + APPLE_FONT;
+      ctx.font = 'bold 12px ' + APPLE_FONT;
       // 方案A（2026-09-13 回退）：元素 = f(品质,等级)，行上只标「元素·X」单字；克制关系留给战斗 HUD 展示
       ctx.fillText('元素·' + el.name, tx + 20, cy + 68);
       // P0-3 词条标签（行右下角，词条色，最多 2 条连写；与左侧元素行同一基线）
@@ -4896,14 +4896,14 @@ class Renderer {
       if (trTags.length) {
         ctx.textAlign = 'right'; ctx.textBaseline = 'alphabetic';
         ctx.fillStyle = trTags[0].color;
-        ctx.font = '10px ' + APPLE_FONT;
+        ctx.font = '12px ' + APPLE_FONT;
         ctx.fillText(trTags.map(t => t.name).join('·'), rowX + rowW - 14, cy + 68);
         ctx.textAlign = 'left';
       }
       // 羁绊标记
       if (resonance.active && resonance.elementIdx === bb.elementIdx) {
         ctx.fillStyle = '#ffd54f';
-        ctx.font = 'bold 11px ' + APPLE_FONT;
+        ctx.font = 'bold 12px ' + APPLE_FONT;
         ctx.textAlign = 'right'; ctx.textBaseline = 'alphabetic';
         ctx.fillText('羁绊+10%', rowX + rowW - 14, cy + 22);
         ctx.textAlign = 'left';
@@ -4934,15 +4934,15 @@ class Renderer {
     this.drawButton(next.x, next.y, next.w, next.h, '下一页', page < pages - 1 ? '#7e57c2' : '#555');
     this.modalRects.push(prev, next);
     ctx.fillStyle = 'rgba(255,255,255,0.7)';
-    ctx.font = '11px ' + APPLE_FONT; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.font = '12px ' + APPLE_FONT; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
     ctx.fillText((page + 1) + ' / ' + pages + '  ·  共 ' + list.length + ' 只', w / 2, navY + arrowH / 2);
 
     // P1-6 挑战券条：免费 N/5 · 加发券 M + [广告+2] [分享+2]（次数限制本身就是分享动机）
     const tY = navY + arrowH + 6, tH = 26;
-    ctx.fillStyle = 'rgba(255,255,255,0.06)';
+    ctx.fillStyle = UI.color.ink.faint;
     this.roundRect(bx + 14, tY, bw - 28, tH, 13); ctx.fill();
     ctx.fillStyle = 'rgba(255,255,255,0.75)';
-    ctx.font = '11px ' + APPLE_FONT;
+    ctx.font = '12px ' + APPLE_FONT;
     ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
     const ftl = (typeof g.freeTicketsLeft === 'function') ? g.freeTicketsLeft() : 0;
     ctx.fillText('🎟 免费挑战 ' + ftl + '/5 · 加发券 ' + (g.bonusTickets || 0), bx + 24, tY + tH / 2);
@@ -4967,7 +4967,7 @@ class Renderer {
     const canReroll = !!rerBb && rerCost > 0 && g.coins >= rerCost;
     const rbtn = { x: conf.x + confW + 8, y: confY, w: rerW, h: rerH, action: 'trait_reroll' };
     this.drawButton(rbtn.x, rbtn.y, rbtn.w, rbtn.h, '洗词条', canReroll ? '#7e57c2' : '#555');
-    ctx.fillStyle = canReroll ? 'rgba(255,255,255,0.85)' : 'rgba(255,255,255,0.4)';
+    ctx.fillStyle = canReroll ? UI.color.ink.bright : 'rgba(255,255,255,0.4)';
     ctx.font = '9px ' + APPLE_FONT;
     ctx.textAlign = 'center'; ctx.textBaseline = 'alphabetic';
     ctx.fillText(rerBb ? (rerCost + ' 金币') : '先选陀螺', rbtn.x + rbtn.w / 2, rbtn.y + 36);

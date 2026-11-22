@@ -6,7 +6,15 @@ const UI = {
     primary: '#7e57c2', accent: '#e53935', success: '#00e676', warn: '#ff7043',
     gold: '#ffd54f', goldBright: '#ffca28', text: '#ffffff',
     textWeak: 'rgba(255,255,255,0.72)', disabled: 'rgba(255,255,255,0.32)',
-    mask: 'rgba(35,18,70,0.62)'
+    mask: 'rgba(35,18,70,0.62)',
+    // 白色透明度 5 档（设计评审 2026-11-22：20+ 种手写字面量归一；就近档映射 0.4→disabled / 0.6&0.55→body）
+    ink: {
+      faint: 'rgba(255,255,255,0.06)',   // 底衬/填充（原 0.06/0.07）
+      line: 'rgba(255,255,255,0.16)',    // 描边/分隔（原 0.16）
+      body: 'rgba(255,255,255,0.55)',    // 次级正文（原 0.55/0.6）
+      strong: 'rgba(255,255,255,0.72)',  // 强调文字（= textWeak 同值，语义别名）
+      bright: 'rgba(255,255,255,0.85)'   // 近主文字（原 0.85）
+    }
   },
   radius: { sm: 8, md: 14, lg: 20 },
   icon: { glyph: '#ffffff', stroke: 'rgba(255,255,255,0.30)', weight: 1.4 },   // ③3-3 单色图形 + 统一描边

@@ -3111,7 +3111,7 @@ class SpintopBattle {
     // 狂暴标记
     if (this.isBoss && this._bossEnraged) {
       ctx.fillStyle = '#ff5252';
-      ctx.font = 'bold 11px ' + APPLE_FONT;
+      ctx.font = 'bold 12px ' + APPLE_FONT;
       ctx.fillText('狂暴', hpX + hpW + 18, hpY + hpH / 2);
     }
     ctx.restore();
@@ -3122,7 +3122,7 @@ class SpintopBattle {
     const scoreStr = formatNumber0(this.displayScore);
     ctx.font = 'bold 26px ' + APPLE_FONT;
     const numW = Math.ceil(ctx.measureText(scoreStr).width);
-    ctx.font = 'bold 11px ' + APPLE_FONT;
+    ctx.font = 'bold 12px ' + APPLE_FONT;
     const labW = Math.ceil(ctx.measureText('我方得分').width);
     const plateW = Math.min(w - 24, Math.max(numW, labW) + 40);
     const plateH = 46;
@@ -3140,7 +3140,7 @@ class SpintopBattle {
     ctx.strokeStyle = 'rgba(55,182,255,0.45)'; ctx.lineWidth = 1;
     roundRectPath(ctx, plateX + 0.5, plateY + 0.5, plateW - 1, plateH - 1, 11.5); ctx.stroke();
     // 「我方得分」小标
-    ctx.font = 'bold 11px ' + APPLE_FONT;
+    ctx.font = 'bold 12px ' + APPLE_FONT;
     ctx.fillStyle = 'rgba(55,182,255,0.95)';
     ctx.fillText('我方得分', cx, plateY + 14);
     // 分数数字（主题色辉光；低端机 _fxLow 关闭软光晕，与全局降级一致省 CPU——OPPO R17 等 FPS 瓶颈根因）
@@ -3199,7 +3199,7 @@ class SpintopBattle {
       const relCol = this.elementRel === 'adv' ? '#66ff9a' : (this.elementRel === 'counter' ? '#ff8a80' : 'rgba(255,255,255,0.55)');
       ctx.save();
       ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
-      ctx.font = '10px ' + APPLE_FONT;
+      ctx.font = '12px ' + APPLE_FONT;
       ctx.fillStyle = relCol;
       // 方案B：克制已是"品质环"，文案带上神兽名，让玩家把「土克水」直接读成「麒麟克玄武」
       const _pTn = (this.playerBb.tier) ? this.playerBb.tier.name : pEl.name;
@@ -3413,7 +3413,7 @@ class SpintopBattle {
     ctx.font = '12px ' + APPLE_FONT;
     ctx.fillStyle = 'rgba(255,255,255,0.72)';
     ctx.fillText('快速上滑 · 连击得分更高', gx + 26, gy + 14);
-    ctx.font = '11px ' + APPLE_FONT;
+    ctx.font = '12px ' + APPLE_FONT;
     ctx.fillStyle = 'rgba(255,213,79,0.9)';
     ctx.fillText('攒够目标分数即获胜 · 把对手撞飞是额外惊喜', gx + 26, gy + 38);
     ctx.restore();
@@ -3850,7 +3850,7 @@ class SpintopBattle {
       cursor += 12;                        // 呼吸间距：能量模块与提示之间
       const noteY = cursor + NOTE_H / 2;   // 提示居中于其预留高度，避免压到按钮
       ctx.fillStyle = 'rgba(255,255,255,0.72)';
-      ctx.font = '11px sans-serif';
+      ctx.font = '12px sans-serif';
       ctx.fillText(lost ? '连胜中断，再接再厉' : '再接再厉', cx, noteY);
       cursor += NOTE_H;                    // 24，与 totalH 预留一致
     }
@@ -3866,7 +3866,7 @@ class SpintopBattle {
       ctx.shadowBlur = 0;
       ctx.fillStyle = '#ffcc80'; ctx.font = 'bold 15px sans-serif'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
       ctx.fillText('看广告 金币翻倍', cx, dpY + dpH / 2 + 0.5);
-      ctx.fillStyle = 'rgba(255,224,178,0.75)'; ctx.font = '11px sans-serif';
+      ctx.fillStyle = 'rgba(255,224,178,0.75)'; ctx.font = '12px sans-serif';
       // 损失厌恶 + 算得清的账：把「翻倍」写成具体金币数（"再看一则 +N"），
       // 而非模糊的「可翻倍」—— 局内打得越好基础奖励越多，翻倍诱惑越大。
       // reward 为本局已入账的基础金币（与 main._watchResultDouble 的 extra 同源），
