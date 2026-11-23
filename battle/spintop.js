@@ -6,6 +6,7 @@
 
 const { randomBeyblade, drawBeyblade, ELEMENTS, elementMultiplier, getTierLevelImg } = require('../src/beyblade');
 const { drawVectorIcon, prepSrc: _prepSrc, loadOne: _loadOne, downscaleToCap } = require('../src/utils');
+const { UI } = require('../src/ui');   // 数字嗓音（familyDigit）+ 语义色令牌（评审归一 2026-11-22）
 const { reportBattleStart, reportFirstBattleDone, reportFunnelFirstWin } = require('../src/analytics'); // 零成本埋点（P1 数据盲区）+ 生死漏斗·首胜（P0-1）
 
 /**
@@ -2009,7 +2010,8 @@ class SpintopBattle {
       }
 
       // 大字（带发光）
-      ctx.font = 'bold ' + Math.floor(90 * scale) + 'px sans-serif';
+      // 数字嗓音：纯数字拍用 GameDigits（GO! 拍含字母，回退系统字）
+      ctx.font = 'bold ' + Math.floor(90 * scale) + 'px ' + (isGo ? 'sans-serif' : UI.familyDigit);
       ctx.fillStyle = cdColor;
       ctx.shadowColor = cdColor;
       ctx.shadowBlur = this._fxLow ? 0 : 35;
@@ -3029,7 +3031,7 @@ class SpintopBattle {
     const timeLeft = Math.ceil(this.timeRemaining);
     const warn = timeLeft <= 10;
     const tTxt = timeLeft + 's';
-    ctx.font = 'bold 17px sans-serif';
+    ctx.font = 'bold 17px ' + UI.familyDigit;
     const tW = Math.ceil(ctx.measureText(tTxt).width) + 36;
     const tH = 34;
     // 水平居中，与下面的分数面板中心线对齐
@@ -3069,7 +3071,7 @@ class SpintopBattle {
     ctx.stroke();
     // 时间文字（低端机关闭文字阴影，省 CPU）
     ctx.fillStyle = warn ? '#FF6B6B' : '#ffffff';
-    ctx.font = 'bold 17px sans-serif';
+    ctx.font = 'bold 17px ' + UI.familyDigit;
     ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
     if (!this._fxLow) { ctx.shadowColor = 'rgba(0,0,0,0.5)'; ctx.shadowBlur = 2; }
     ctx.fillText(tTxt, tX + 27, topY + tH / 2 + 0.5);
@@ -3120,7 +3122,7 @@ class SpintopBattle {
     ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
     ctx.save();
     const scoreStr = formatNumber0(this.displayScore);
-    ctx.font = 'bold 26px ' + APPLE_FONT;
+    ctx.font = 'bold 26px ' + UI.familyDigit;
     const numW = Math.ceil(ctx.measureText(scoreStr).width);
     ctx.font = 'bold 12px ' + APPLE_FONT;
     const labW = Math.ceil(ctx.measureText('我方得分').width);
@@ -3146,7 +3148,7 @@ class SpintopBattle {
     // 分数数字（主题色辉光；低端机 _fxLow 关闭软光晕，与全局降级一致省 CPU——OPPO R17 等 FPS 瓶颈根因）
     if (!this._fxLow) { ctx.shadowColor = hexToRgba(top.color, 0.5); ctx.shadowBlur = 8; }
     ctx.fillStyle = '#ffffff';
-    ctx.font = 'bold 26px ' + APPLE_FONT;
+    ctx.font = 'bold 26px ' + UI.familyDigit;
     ctx.fillText(scoreStr, cx, plateY + 33);
     ctx.shadowBlur = 0;
     ctx.restore();
@@ -3704,7 +3706,7 @@ class SpintopBattle {
     const tScore = clamp01((t - 0.3) / 0.7);
     const shownScore = Math.round(this.score * easeOutCubic(tScore));
     ctx.fillStyle = '#ffffff';
-    ctx.font = 'bold 46px sans-serif';
+    ctx.font = 'bold 46px ' + UI.familyDigit;
     ctx.fillText(formatNumber0(shownScore), cx, scoreY);
     ctx.fillStyle = 'rgba(255,255,255,0.66)';
     ctx.font = '12px sans-serif';
@@ -3729,19 +3731,20 @@ class SpintopBattle {
       ctx.textAlign = 'center';
     } else if (isWin) {
       const chips = [
-        { icon: 'coin', txt: '+' + formatNumber0(this.reward) },
-        { icon: 'double', txt: '连胜 ×' + streak + '  ×' + mult + '倍' }
+        { icon: 'coin', txt: '+' + formatNumber0(this.reward), w: 96 },
+        // 先说人话再给数（花叔范式 · 2026-11-22）：倍率下一档目标直接告诉玩家
+        { icon: 'double', txt: '连胜 ×' + streak + ' ×' + mult + '倍' + (streak < 4 ? ' · 差 1 胜到 ×' + (streak < 2 ? 2 : streak < 3 ? 3 : 5) : ' · 倍率已满'), w: 210 }
       ];
-      const gap = 10, cw = 96, chh = 28;
-      const total = cw * chips.length + gap * (chips.length - 1);
+      const gap = 10, chh = 28;
+      const total = chips.reduce((s, c) => s + c.w, 0) + gap * (chips.length - 1);
       let cxx = cx - total / 2;
       chips.forEach((c, i) => {
         const ccx = cxx, ccy = chipTop + chh / 2;
-        this._popIn(ctx, ccx + cw / 2, ccy, 0.8 + i * 0.12, t, () => {
+        this._popIn(ctx, ccx + c.w / 2, ccy, 0.8 + i * 0.12, t, () => {
           ctx.fillStyle = 'rgba(255,255,255,0.1)';
-          roundRectPath(ctx, ccx, chipTop, cw, chh, chh / 2); ctx.fill();
+          roundRectPath(ctx, ccx, chipTop, c.w, chh, chh / 2); ctx.fill();
           ctx.strokeStyle = 'rgba(255,255,255,0.22)'; ctx.lineWidth = 1;
-          roundRectPath(ctx, ccx + 0.5, chipTop + 0.5, cw - 1, chh - 1, chh / 2 - 0.5); ctx.stroke();
+          roundRectPath(ctx, ccx + 0.5, chipTop + 0.5, c.w - 1, chh - 1, chh / 2 - 0.5); ctx.stroke();
           drawHudIcon(ctx, c.icon, ccx + 16, ccy, 18);
           ctx.fillStyle = '#ffd54f';
           ctx.font = 'bold 13px sans-serif';
@@ -3749,7 +3752,7 @@ class SpintopBattle {
           ctx.fillText(c.txt, ccx + 32, ccy);
           ctx.textAlign = 'center';
         });
-        cxx += cw + gap;
+        cxx += c.w + gap;
       });
     } else {
       // ---- 失败页能量核心模块：当前能量 + 分段能量槽 + 本局扣除 ----

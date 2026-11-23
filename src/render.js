@@ -994,7 +994,8 @@ class Renderer {
     else this._coinRoll.v += _coinDiff * 0.12;
     const coinTxt = formatNumber(Math.round(this._coinRoll.v));
     // P2-4：先按金币实际绘制字体测量宽度，否则沿用上一帧残留字体导致 coinW 计算错误
-    ctx.font = 'bold 15px ' + APPLE_FONT;
+    // 数字嗓音（2026-11-22）：金币数字用 GameDigits 展示字体（纯数字串，子集覆盖）
+    ctx.font = 'bold 15px ' + UI.familyDigit;
     const coinTxtW = Math.ceil(mtW(ctx, coinTxt));
     const coinW = coinPad * 2 + coinIcon + coinGap + coinTxtW;
     const coinX = L.leftPad, coinY = y + (L.topBarH - coinH) / 2, coinCy = coinY + coinH / 2;
@@ -2955,7 +2956,9 @@ class Renderer {
     ctx.restore();
   }
 
-  // ── 细节打磨：合成升级对比停顿帧 ──
+  // ── 签名动画：合成「出炉」三拍（花叔范式 02 签名物件 · 2026-11-22）──
+  // 三拍节奏：①「出炉！」大字砸入（0.1~0.4s）→ ②火花迸溅（0.25s 一次性触发）
+  // → ③新旧对比淡入（0.45~1.5s）。只出现在合成完成这一件事上（签名物件纪律）。
   _drawMergeReveal() {
     const mr = this.game.mergeReveal;
     if (!mr || mr.t > 1.5) return;
@@ -2963,12 +2966,41 @@ class Renderer {
     const alpha = mr.t < 0.15 ? mr.t / 0.15 : (mr.t > 1.2 ? Math.max(0, (1.5 - mr.t) / 0.3) : 1);
     const cy = h * 0.42;
     const gap = 100;
+    // Beat 2 · 火花迸溅（一次性：出炉瞬间铁砧敲下的火星）
+    if (mr.t >= 0.25 && !mr._sparked) {
+      mr._sparked = true;
+      this.addParticles(w / 2 + gap, cy, '#ffd54f', 18);
+      this.addParticles(w / 2 + gap, cy, '#ffffff', 8);
+    }
     ctx.save();
     // 半透明底
     ctx.globalAlpha = alpha * 0.55;
     ctx.fillStyle = '#0a0620';
     ctx.fillRect(0, cy - 95, w, 190);
     ctx.globalAlpha = alpha;
+    // Beat 1 ·「出炉！」大字砸入（easeOutBack 0.5→1 弹性）
+    const _ob = Math.max(0, Math.min(1, (mr.t - 0.1) / 0.3));
+    const _c1 = 1.70158;
+    const _ease = 1 + (_c1 + 1) * Math.pow(_ob - 1, 3) + _c1 * Math.pow(_ob - 1, 2);
+    if (_ob > 0) {
+      ctx.save();
+      ctx.translate(w / 2, cy - 82);
+      ctx.scale(0.5 + 0.5 * _ease, 0.5 + 0.5 * _ease);
+      ctx.font = 'bold 30px ' + APPLE_FONT;
+      ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+      ctx.lineJoin = 'round';
+      ctx.lineWidth = 5;
+      ctx.strokeStyle = '#4a2c00';
+      ctx.strokeText('出炉！', 0, 0);
+      ctx.fillStyle = '#ffd54f';
+      ctx.shadowColor = '#ffd54f';
+      ctx.shadowBlur = this._fxLow ? 0 : 16;
+      ctx.fillText('出炉！', 0, 0);
+      ctx.restore();
+    }
+    // Beat 3 · 新旧对比淡入（0.45 起淡入，让出炉先立住）
+    const cmpAlpha = Math.max(0, Math.min(1, (mr.t - 0.45) / 0.25)) * alpha;
+    ctx.globalAlpha = cmpAlpha;
     // 旧等级（左）+ 新等级（右）
     const oldBb = new Beyblade(mr.tierIndex, Math.max(1, mr.oldLevel));
     const newBb = new Beyblade(mr.tierIndex, mr.newLevel);
@@ -3906,7 +3938,7 @@ class Renderer {
       ctx.fillText(t2.name, tx, rY + 42);
       // 奖励
       ctx.fillStyle = reached ? 'rgba(255,255,255,0.8)' : 'rgba(255,255,255,0.32)';
-      ctx.font = '9px ' + APPLE_FONT;
+      ctx.font = '12px ' + APPLE_FONT;
       const rw = t2.reward;
       ctx.fillText('+' + rw.coins, tx, rY + 54);
       ctx.fillStyle = reached ? 'rgba(255,213,79,0.9)' : 'rgba(255,255,255,0.3)';
@@ -4029,7 +4061,7 @@ class Renderer {
       this.modalRects.push(btn);
     }
     ctx.fillStyle = 'rgba(255,255,255,0.5)';
-    ctx.font = '9px ' + APPLE_FONT;
+    ctx.font = '12px ' + APPLE_FONT;
     ctx.textAlign = 'center';
     ctx.fillText(meta.weekend ? '白虎图纸直购是高阶金币的主要去向 · 洗词条半价进行中' : '周末开放：BOSS 积分×2 · 洗词条半价 · 限量商店', w / 2, by + bh - 16);
 
@@ -4100,7 +4132,7 @@ class Renderer {
       this.modalRects.push(btn);
     }
     ctx.fillStyle = 'rgba(255,255,255,0.45)';
-    ctx.font = '9px ' + APPLE_FONT;
+    ctx.font = '12px ' + APPLE_FONT;
     ctx.textAlign = 'center';
     ctx.fillText('红点 = 今日有可领奖励', w / 2, by + bh - 14);
 
@@ -4237,7 +4269,7 @@ class Renderer {
     ctx.fillText(grand ? '欢迎归来 · 大礼包' : '欢迎归来', w / 2, by + 36);
     ctx.fillStyle = 'rgba(209,196,233,0.92)';
     ctx.font = '12px ' + APPLE_FONT;
-    ctx.fillText('离线 ' + hrs + ' 小时 · 专属回归福利', w / 2, by + 60);
+    ctx.fillText('炉火未熄 · 离开已有 ' + hrs + ' 小时', w / 2, by + 60);
 
     // 礼包图标
     const gY = by + 122;
@@ -4349,7 +4381,7 @@ class Renderer {
     this.drawButton(openBtn.x, openBtn.y, openBtn.w, openBtn.h, openLabel, openColor);
     this.modalRects.push(openBtn);
     ctx.fillStyle = (freeAvail || adBroken) ? 'rgba(129,199,132,0.95)' : 'rgba(255,255,255,0.5)';
-    ctx.font = '9px ' + APPLE_FONT;
+    ctx.font = '12px ' + APPLE_FONT;
     ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
     ctx.fillText(openHint, w / 2, by + bh - 18);
 
@@ -4945,7 +4977,11 @@ class Renderer {
     ctx.font = '12px ' + APPLE_FONT;
     ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
     const ftl = (typeof g.freeTicketsLeft === 'function') ? g.freeTicketsLeft() : 0;
-    ctx.fillText('🎟 免费挑战 ' + ftl + '/5 · 加发券 ' + (g.bonusTickets || 0), bx + 24, tY + tH / 2);
+    const _bonus = g.bonusTickets || 0;
+    // 先说人话再给数（花叔范式 · 2026-11-22）：券数换算成「能打几局」
+    const _battles = ftl + _bonus;
+    const _tail = _battles > 0 ? ' · 可战 ' + _battles + ' 局' : ' · 能量还可战 ' + Math.max(0, Math.floor((g.energy || 0) / 20)) + ' 局';
+    ctx.fillText('🎟 免费挑战 ' + ftl + '/5 · 加发券 ' + _bonus + _tail, bx + 24, tY + tH / 2);
     const adOk = (typeof g.canEarnAdTickets === 'function') ? g.canEarnAdTickets() : false;
     const shOk = (typeof g.canShare === 'function') ? g.canShare() : false;
     const adBtn = { x: bx + bw - 14 - 64 - 6 - 64, y: tY + 2, w: 64, h: 22, action: 'ticket_ad' };
@@ -4968,7 +5004,7 @@ class Renderer {
     const rbtn = { x: conf.x + confW + 8, y: confY, w: rerW, h: rerH, action: 'trait_reroll' };
     this.drawButton(rbtn.x, rbtn.y, rbtn.w, rbtn.h, '洗词条', canReroll ? '#7e57c2' : '#555');
     ctx.fillStyle = canReroll ? UI.color.ink.bright : 'rgba(255,255,255,0.4)';
-    ctx.font = '9px ' + APPLE_FONT;
+    ctx.font = '12px ' + APPLE_FONT;
     ctx.textAlign = 'center'; ctx.textBaseline = 'alphabetic';
     ctx.fillText(rerBb ? (rerCost + ' 金币') : '先选陀螺', rbtn.x + rbtn.w / 2, rbtn.y + 36);
     this.modalRects.push(rbtn);

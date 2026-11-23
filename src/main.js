@@ -115,6 +115,12 @@ class Main {
     } catch (e) {}
     this.perfLevel = perfLevel;
 
+    // 数字嗓音字体（花叔范式「字体就是声音」· 2026-11-22）：Rajdhani 数字子集 1.7KB woff2，
+    // loadFontFace 全局注册 'GameDigits'；LOW 档跳过（省一次字体内存映射，自动回退系统字）。
+    if (perfLevel !== 'LOW') {
+      try { require('./fontdigits').loadDigitFont(); } catch (e) {}
+    }
+
     // LOW 档低分辨率渲染：Canvas 2D 软渲染成本与像素量成正比（荣耀Play5T 11fps / P20 22fps 卡 P0）。
     // 启动时一次性把 canvas 降到低分辨率，微信自动拉伸全屏；
     // 所有逻辑坐标用 canvas.width/height 自动适配。注：微信 touch 事件坐标本身是逻辑像素，input 不再反缩放（见 input.js _normalize）。
@@ -707,7 +713,7 @@ class Main {
               const r = this.game.claimReturn();
               if (r) {
                 this.audio.play('win');
-                let txt = r.grand ? '回归大礼包：+' + r.coins + '金币 能量回满' : '回归礼包：+' + r.coins + '金币 能量回满';
+                let txt = (r.grand ? '炉火未熄 · 回归大礼包：' : '炉火未熄 · 回归礼包：') + '+' + r.coins + '金币 能量回满';
                 if (r.coupon) txt += ' · 白虎保底券';
                 this.renderer.addFloatText(this.cw / 2, this.ch * 0.4, txt, '#ffd54f');
                 this._toast(txt);
@@ -907,7 +913,8 @@ class Main {
                 if (reward.freeDraw) txt += '免费抽卡券×' + reward.freeDraw + ' ';
                 if (reward.beyblade) txt += '白虎陀螺!';
                 this.renderer.addFloatText(this.cw / 2, this.ch * 0.42, txt.trim(), '#ffd54f');
-                this._toast('签到成功：' + txt.trim());
+                // 锻造立场文案（花叔范式「文案有立场」· 2026-11-22）：「开炉」替代通用「签到」
+                this._toast('今日开炉 · 第' + reward.day + '天：' + txt.trim());
                 // 签到成功后自动关闭签到面板，回到主界面后光晕不再闪
                 this.game.signOpen = false;
                 // 高意图手势内请求次日订阅（留存拉回）；会话内仅弹一次，模板未配则静默
