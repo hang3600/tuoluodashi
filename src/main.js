@@ -526,6 +526,7 @@ class Main {
             } else if (a === 'merge') {
               const merged = this.game.tryMerge();
               if (merged) {
+                merged._glowT = Date.now();   // 陀螺即角色：出炉 1.2s 金环余晖（render.drawPlatform 读）
                 // 细节打磨：合成升级对比停顿帧——让玩家看到 Lv 前后的贴图差异
                 this.game.mergeReveal = { tierIndex: merged.tierIndex, oldLevel: merged.level - 1, newLevel: merged.level, t: 0 };
                 const cx = this.cw / 2;
@@ -1222,20 +1223,75 @@ class Main {
   }
 
   // 对战胜利炫耀：分享战绩（不带能量奖励，纯裂变拉新）
+  /**
+   * 战报分享卡（花叔范式 08 · 2026-11-24）：离屏 canvas 动态生成本局战绩图（500×400, 5:4）
+   * ——大分数用 GameDigits 数字嗓音，锻造金框；生成失败回落 CONFIG.shareCardImage 静态图。
+   * 离屏 canvas 复用（_shareCvs），避免每次分享新建组件。
+   */
+  _makeResultShareImage(done) {
+    try {
+      if (typeof wx === 'undefined' || !wx.createCanvas || !wx.canvasToTempFilePath) { done(null); return; }
+      if (!this._shareCvs) this._shareCvs = wx.createCanvas();
+      const c = this._shareCvs;
+      c.width = 500; c.height = 400;
+      const ctx = c.getContext('2d');
+      const b = this.game.battle;
+      const score = (b && b.score) || 0;
+      const stage = (b && b.runStage) || 1;
+      const streak = this.game.winStreak || 0;
+      const mult = (this.game.streakMultiplier && this.game.streakMultiplier()) || 1;
+      // 宇宙底
+      const g = ctx.createLinearGradient(0, 0, 0, 400);
+      g.addColorStop(0, '#241448');
+      g.addColorStop(1, '#0a0620');
+      ctx.fillStyle = g; ctx.fillRect(0, 0, 500, 400);
+      // 锻造金框
+      ctx.strokeStyle = '#ffd54f'; ctx.lineWidth = 3;
+      ctx.strokeRect(10, 10, 480, 380);
+      // 标题
+      ctx.fillStyle = '#ffd54f'; ctx.font = 'bold 22px sans-serif'; ctx.textAlign = 'center';
+      ctx.fillText('陀螺大师 · 对战战报', 250, 52);
+      // 陀螺盘点缀（代码绘制：紫盘 + 金弧轨迹）
+      ctx.strokeStyle = '#7e57c2'; ctx.lineWidth = 5;
+      ctx.beginPath(); ctx.arc(250, 292, 44, 0, Math.PI * 2); ctx.stroke();
+      ctx.strokeStyle = '#ffd54f'; ctx.lineWidth = 2;
+      ctx.beginPath(); ctx.arc(250, 292, 56, -0.6, Math.PI * 1.15); ctx.stroke();
+      // 大分数（GameDigits 全局字体，LOW 档自动回退系统字）
+      ctx.fillStyle = '#ffffff'; ctx.font = 'bold 72px GameDigits, sans-serif';
+      ctx.fillText(String(score), 250, 158);
+      // 战绩行
+      ctx.font = 'bold 18px sans-serif'; ctx.fillStyle = '#ffd54f';
+      ctx.fillText('第 ' + stage + ' 关 · ' + ((b && b.isBoss) ? 'BOSS 战' : '胜利') + ' · 连胜 ×' + streak + ' · 奖励 ×' + mult + ' 倍', 250, 214);
+      // 人话号召
+      ctx.font = '14px sans-serif'; ctx.fillStyle = 'rgba(255,255,255,0.6)';
+      ctx.fillText('目标 ' + ((b && b.targetScore) || 0) + ' 分 · 你也来转一转？', 250, 246);
+      // 底部
+      ctx.font = '12px sans-serif'; ctx.fillStyle = 'rgba(255,255,255,0.5)';
+      ctx.fillText(new Date().toLocaleDateString('zh-CN') + ' · 微信搜索「陀螺大师」', 250, 372);
+      wx.canvasToTempFilePath({
+        canvas: c, x: 0, y: 0, width: 500, height: 400, destWidth: 500, destHeight: 400,
+        fileType: 'png', quality: 1,
+        success: (res) => done(res.tempFilePath),
+        fail: () => done(null)
+      });
+    } catch (e) { done(null); }
+  }
+
   _shareResult() {
     const b = this.game.battle;
-    const score = b ? b.score : 0;
-    const target = b ? b.targetScore : 0;
     const streak = this.game.winStreak || 1;
-    if (typeof wx !== 'undefined' && wx.shareAppMessage) {
-      wx.shareAppMessage({
-        title: '我在陀螺大师连胜 x' + streak + '，免费合成白虎陀螺，敢来挑战吗？',
-        query: 'from=share',
-        imageUrl: CONFIG.shareCardImage
-      });
-    }
-    this.audio.play('click');
-    this._toast('分享成功');
+    const share = (imageUrl) => {
+      if (typeof wx !== 'undefined' && wx.shareAppMessage) {
+        wx.shareAppMessage({
+          title: '我打到了 ' + ((b && b.score) || 0) + ' 分 · 连胜 x' + streak + '，敢来挑战吗？',
+          query: 'from=share',
+          imageUrl: imageUrl || CONFIG.shareCardImage
+        });
+      }
+      this.audio.play('click');
+      this._toast('分享成功');
+    };
+    this._makeResultShareImage((img) => share(img));
   }
 
   // P0-2 好友榜「炫耀战绩 · 挑战好友」：带真实战绩钩子的分享卡片

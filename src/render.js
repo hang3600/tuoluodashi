@@ -999,21 +999,48 @@ class Renderer {
     const coinTxtW = Math.ceil(mtW(ctx, coinTxt));
     const coinW = coinPad * 2 + coinIcon + coinGap + coinTxtW;
     const coinX = L.leftPad, coinY = y + (L.topBarH - coinH) / 2, coinCy = coinY + coinH / 2;
+    // ── HUD 融入世界（花叔范式 01 · 2026-11-23）：金币胶囊 → 熔炉「矿石计量槽」──
+    // 金属切角槽体（上下对称斜切，非圆胶囊）+ 底部余烬透光：金币=炉边矿石的读数，
+    // 命中区/坐标零改动（纯视觉），中英文字仍走系统字。
     ctx.save();
     ctx.shadowColor = 'rgba(0,0,0,0.28)';
     ctx.shadowBlur = 4 * this.shadowScale;
-    ctx.fillStyle = 'rgba(0,0,0,0.38)';
-    ctx.strokeStyle = 'rgba(255,255,255,0.18)';
-    ctx.lineWidth = 1;
-    this.roundRect(coinX, coinY, coinW, coinH, coinH / 2); ctx.fill(); ctx.stroke();
+    ctx.fillStyle = 'rgba(12,8,26,0.72)';
+    const _orePath = () => {
+      const _cut = 7;   // 切角深度
+      ctx.beginPath();
+      ctx.moveTo(coinX + _cut, coinY);
+      ctx.lineTo(coinX + coinW - _cut, coinY);
+      ctx.lineTo(coinX + coinW, coinY + coinH / 2);
+      ctx.lineTo(coinX + coinW - _cut, coinY + coinH);
+      ctx.lineTo(coinX + _cut, coinY + coinH);
+      ctx.lineTo(coinX, coinY + coinH / 2);
+      ctx.closePath();
+    };
+    _orePath(); ctx.fill();
     ctx.shadowBlur = 0;
+    // 余烬底光（炉火从槽底透上来，随金币量呼吸——满 3 位数以上更亮）
+    const _emberA = 0.16 + 0.08 * Math.sin(Date.now() / 900) + (this.game.coins >= 300 ? 0.1 : 0);
+    const _eg = ctx.createLinearGradient(0, coinY + coinH, 0, coinY + coinH * 0.3);
+    _eg.addColorStop(0, 'rgba(255,110,0,' + _emberA.toFixed(3) + ')');
+    _eg.addColorStop(1, 'rgba(255,110,0,0)');
+    ctx.fillStyle = _eg;
+    _orePath(); ctx.fill();
+    // 金属边（上亮下暗，锻铁感）
+    ctx.strokeStyle = 'rgba(255,255,255,0.22)';
+    ctx.lineWidth = 1;
+    _orePath(); ctx.stroke();
+    ctx.strokeStyle = 'rgba(0,0,0,0.4)';
+    ctx.beginPath(); ctx.moveTo(coinX + 2, coinY + coinH - 1.5); ctx.lineTo(coinX + coinW - 2, coinY + coinH - 1.5); ctx.stroke();
+    ctx.restore();
     // 圆形图标：先裁圆再画 PNG（icon-coin 底为方形，clip 成圆形与设计稿一致）
     const coinIc = coinX + coinPad + coinIcon / 2;
+    ctx.save();
     ctx.beginPath(); ctx.arc(coinIc, coinCy, coinIcon / 2, 0, Math.PI * 2); ctx.clip();
     if (!this._drawPngIcon('coin', coinIc, coinCy, coinIcon)) drawVectorIcon(ctx, 'coin', coinIc, coinCy, coinIcon, '#ffd54f');
     ctx.restore();
     ctx.fillStyle = '#ffd54f';
-    ctx.font = 'bold 15px ' + APPLE_FONT;
+    ctx.font = 'bold 15px ' + UI.familyDigit;
     ctx.textAlign = 'left';
     ctx.textBaseline = 'middle';
     ctx.shadowColor = 'rgba(255,143,0,0.35)';
@@ -1021,37 +1048,37 @@ class Renderer {
     ctx.fillText(coinTxt, coinIc + coinIcon / 2 + coinGap, coinCy);
     ctx.shadowBlur = 0;
 
-    // ----- 中 · 能量条（游戏化：分段+发光+低能量警告+流动光效）-----
+    // ----- 中 · 炉温计（HUD 融入世界 · 2026-11-23）：能量=炉火热度 -----
+    // 语义升级：彩虹条→炉温（暗红余烬→炽橙→亮金）；低能量不再是"红色警报"而是"炉子冷了"
+    // （填充短而暗、余温微光），满格=炉火正旺（亮金+火星高光）。文字低量脉冲警告保留。
     const energyH = 16;
     const ex = L.energyX;
     const ew = L.energyW;
     const ey = y + (L.topBarH - energyH) / 2;
     const p = Math.max(0, Math.min(1, this.game.energy / this.game.maxEnergy));
-    const lowEnergy = p < 0.3;  // 低能量警告阈值
+    const lowEnergy = p < 0.3;  // 低能量警告阈值（文字脉冲用）
     ctx.save();
-    // 外发光（游戏体力条效果，低能量红色警告，正常时紫色主题光）
-    ctx.shadowColor = lowEnergy ? 'rgba(255,82,82,0.6)' : 'rgba(126,87,194,0.6)';
+    // 外发光：满格炉火金光 / 低量微弱余温
+    ctx.shadowColor = lowEnergy ? 'rgba(255,110,0,0.25)' : 'rgba(255,160,40,0.5)';
     ctx.shadowBlur = 6 * this.shadowScale;
-    // 背景：深色半透明 + 内阴影感
-    ctx.fillStyle = 'rgba(20,10,40,0.85)';
+    // 背景：炉膛深色 + 内阴影感
+    ctx.fillStyle = 'rgba(16,9,32,0.88)';
     this.roundRect(ex, ey, ew, energyH, energyH / 2); ctx.fill();
     ctx.shadowBlur = 0;
-    // 填充：渐变（低能量时红色警告，正常时彩虹多彩渐变）
+    // 填充：炉温渐变（冷炉暗红余烬 → 炽橙 → 亮金满格）
     if (p > 0) {
       const fillW = Math.max(energyH - 2, (ew - 2) * p);
-      const pg = this._grad('energyG|' + ex + '|' + ey + '|' + ew + '|' + (lowEnergy ? 'low' : 'rainbow'), () => {
+      const pg = this._grad('energyG|' + ex + '|' + ey + '|' + ew + '|' + (lowEnergy ? 'low' : 'heat'), () => {
         const g0 = ctx.createLinearGradient(ex, ey, ex + ew, ey);
         if (lowEnergy) {
-          g0.addColorStop(0, '#ff5252');
-          g0.addColorStop(1, '#ff8a80');
+          // 炉子冷了：只剩暗红余烬，无亮色
+          g0.addColorStop(0, '#5d1a0a');
+          g0.addColorStop(1, '#8a2c0e');
         } else {
-          // 彩虹多彩渐变：红→橙→黄→绿→蓝→紫
-          g0.addColorStop(0, '#ff5252');
-          g0.addColorStop(0.2, '#ff9800');
-          g0.addColorStop(0.4, '#ffeb3b');
-          g0.addColorStop(0.6, '#00e676');
-          g0.addColorStop(0.8, '#2196f3');
-          g0.addColorStop(1, '#9c27b0');
+          // 炉火升温：余烬红 → 炽橙 → 亮金（热度从左向右升）
+          g0.addColorStop(0, '#c0392b');
+          g0.addColorStop(0.45, '#ff8c00');
+          g0.addColorStop(1, '#ffd54f');
         }
         return g0;
       });
@@ -1754,6 +1781,27 @@ class Renderer {
           } else {
             delete bb._placeT;  // 动画结束即清理，避免存档冗余字段
           }
+        }
+        // ── 陀螺即角色（花叔范式 07 · 2026-11-23）：待机姿态跟随玩家状态，数字退到后面 ──
+        // ① 待机旋转：炉温（能量）足→转得欢，炉子冷→转得蔫（满 2.6 / 正常 1.8 / 低 0.7 rad/s）
+        const _hp = this.game.maxEnergy > 0 ? this.game.energy / this.game.maxEnergy : 1;
+        const _spin = _hp >= 1 ? 2.6 : (_hp >= 0.3 ? 1.8 : 0.7);
+        const _nowMs = Date.now();
+        if (this._homeSpinT == null) this._homeSpinT = _nowMs;
+        const _sdt = Math.min(0.12, (_nowMs - this._homeSpinT) / 1000);
+        bb.angle = (bb.angle || 0) + _spin * _sdt;
+        // ② 连胜火焰拖尾：连胜≥2 像炉边烧红冒火星（低频 1 粒/260ms；≥4 加金粒）
+        if ((this.game.winStreak || 0) >= 2 && _nowMs - (this._flameT || 0) > 260) {
+          this._flameT = _nowMs;
+          this.addParticles(sx, sy + slotR * 0.5, '#ff8c00', 1);
+          if ((this.game.winStreak || 0) >= 4) this.addParticles(sx, sy + slotR * 0.5, '#ffd54f', 1);
+        }
+        // ③ 刚出炉发亮：合成完成 1.2s 内槽位金环余晖
+        if (bb._glowT && _nowMs - bb._glowT < 1200) {
+          const _gk = 1 - (_nowMs - bb._glowT) / 1200;
+          ctx.strokeStyle = 'rgba(255,213,79,' + (0.5 * _gk).toFixed(3) + ')';
+          ctx.lineWidth = 3;
+          ctx.beginPath(); ctx.arc(sx, sy, slotR * 1.02, 0, Math.PI * 2); ctx.stroke();
         }
         // 合成台：所有等级陀螺尺寸一致（uniformSize），避免高等级陀螺超出槽位
         // maxSize = slotR*1.88 → 陀螺直径占虚线槽位直径的 94%（原 1.8=90%，视觉偏空）

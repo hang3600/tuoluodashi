@@ -91,7 +91,8 @@ const SUITES = [
   { file: 'smoke_traits.js', desc: 'P0-3 词条系统：7 词条池 + 获取点分配 + 合成并集继承封顶2 + clone 携带 + 战斗映射（暴击/连击窗/开局怒气/出界线/得分/抽打/回怒）+ 金币洗词条递增定价（含周末半价）+ 存档持久化与老档迁移' },
   { file: 'smoke_p1_wave.js', desc: 'P1 第二波：#5 激斗周末（限时商店限量/周记账/BOSS积分×2/洗词条半价） + #6 挑战券（每日5免费+广告/分享+2，免费→加发→能量逐层消耗，_battleAgain 免票语义不变） + #7 影子战（纪录局关卡号 + ghost 局目标分≥纪录×1.05） + UI/派发接线门禁' },
   { file: 'smoke_polish_wave.js', desc: 'P2 细度波：爆发抽打免费化(去隐藏扣能) + 收卡广告预告(手势窗口内) + 图鉴引导(首收卡toast+tab光晕一次性) + 福利中心(签到/任务/助力三合一单入口) + 赛季荣耀(巅峰段位+首达大师限定) + run流派协同(攻/金/守 2层触发) + 回归礼包延后到首次结算' },
-  { file: 'smoke_render_matrix.js', desc: '全链路渲染状态矩阵（2026-11-08）：32 状态×12 帧 render() 零抛错 + 冷启动首帧对齐不暗闪 + 切Tab暗闪回归锁（真机 doFrame ctx not defined 事故门禁）' }
+  { file: 'smoke_render_matrix.js', desc: '全链路渲染状态矩阵（2026-11-08）：32 状态×12 帧 render() 零抛错 + 冷启动首帧对齐不暗闪 + 切Tab暗闪回归锁（真机 doFrame ctx not defined 事故门禁）' },
+  { file: 'smoke_world_role.js', desc: '8.0→9.0 三大件门禁（2026-11-24 · 花叔范式 01/07/08）：HUD 矿石槽+炉温计 / 陀螺即角色三态(旋转·火星·出炉金环) / 战报分享卡(离屏canvas+GameDigits+回落)' }
 ];
 
 function runOne(file) {
