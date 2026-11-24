@@ -1020,12 +1020,18 @@ class Renderer {
     _orePath(); ctx.fill();
     ctx.shadowBlur = 0;
     // 余烬底光（炉火从槽底透上来，随金币量呼吸——满 3 位数以上更亮）
+    // 渐变本体走 _grad 缓存（顶栏每帧都画，不在帧内 createLinearGradient）；呼吸用 globalAlpha 调制
     const _emberA = 0.16 + 0.08 * Math.sin(Date.now() / 900) + (this.game.coins >= 300 ? 0.1 : 0);
-    const _eg = ctx.createLinearGradient(0, coinY + coinH, 0, coinY + coinH * 0.3);
-    _eg.addColorStop(0, 'rgba(255,110,0,' + _emberA.toFixed(3) + ')');
-    _eg.addColorStop(1, 'rgba(255,110,0,0)');
+    const _eg = this._grad('oreEmber|' + Math.round(coinY) + '|' + Math.round(coinH), () => {
+      const g0 = ctx.createLinearGradient(0, coinY + coinH, 0, coinY + coinH * 0.3);
+      g0.addColorStop(0, 'rgba(255,110,0,1)');
+      g0.addColorStop(1, 'rgba(255,110,0,0)');
+      return g0;
+    });
+    ctx.globalAlpha = _emberA;
     ctx.fillStyle = _eg;
     _orePath(); ctx.fill();
+    ctx.globalAlpha = 1;
     // 金属边（上亮下暗，锻铁感）
     ctx.strokeStyle = 'rgba(255,255,255,0.22)';
     ctx.lineWidth = 1;
@@ -1731,6 +1737,13 @@ class Renderer {
     const slotR = L.slotR;
     const circum = L.slotCircum;
     const angles = L.slotAngles; // 上 / 右下 / 左下
+    // 陀螺即角色·待机旋转的帧步长：每帧（每次 drawPlatform）只取一次真实帧间隔，时间戳必须在这里更新——
+    // 放进槽位循环会让第 2/3 槽拿到 dt≈0；不更新则 dt 无界增长、被钳到上限后变成"每帧固定转一份"（转得过快）。
+    // 上限 120ms：切后台/卡顿回来不跳变。
+    const _nowMs = Date.now();
+    if (this._homeSpinT == null) this._homeSpinT = _nowMs;
+    const _sdt = Math.min(0.12, Math.max(0, (_nowMs - this._homeSpinT) / 1000));
+    this._homeSpinT = _nowMs;
     for (let i = 0; i < 3; i++) {
       const ang = angles[i];
       // 以 (cx, cy) 为心，外接圆半径 circum，角 ang（数学坐标：-90°=朝上）
@@ -1783,18 +1796,16 @@ class Renderer {
           }
         }
         // ── 陀螺即角色（花叔范式 07 · 2026-11-23）：待机姿态跟随玩家状态，数字退到后面 ──
-        // ① 待机旋转：炉温（能量）足→转得欢，炉子冷→转得蔫（满 2.6 / 正常 1.8 / 低 0.7 rad/s）
+        // ① 待机旋转：炉温（能量）足→转得欢，炉子冷→转得蔫（满 2.6 / 正常 1.8 / 低 0.7 rad/s；
+        //    与图鉴陈列自转 CODEX_SPIN=2 同一量级）。步长 _sdt 在循环外按真实帧间隔算好。
         const _hp = this.game.maxEnergy > 0 ? this.game.energy / this.game.maxEnergy : 1;
         const _spin = _hp >= 1 ? 2.6 : (_hp >= 0.3 ? 1.8 : 0.7);
-        const _nowMs = Date.now();
-        if (this._homeSpinT == null) this._homeSpinT = _nowMs;
-        const _sdt = Math.min(0.12, (_nowMs - this._homeSpinT) / 1000);
         bb.angle = (bb.angle || 0) + _spin * _sdt;
-        // ② 连胜火焰拖尾：连胜≥2 像炉边烧红冒火星（低频 1 粒/260ms；≥4 加金粒）
+        // ② 连胜余烬：连胜≥2 槽位底部低频飘出向上升的火星（1 粒/260ms）；≥4 再加金粒
         if ((this.game.winStreak || 0) >= 2 && _nowMs - (this._flameT || 0) > 260) {
           this._flameT = _nowMs;
-          this.addParticles(sx, sy + slotR * 0.5, '#ff8c00', 1);
-          if ((this.game.winStreak || 0) >= 4) this.addParticles(sx, sy + slotR * 0.5, '#ffd54f', 1);
+          this._addEmber(sx, sy + slotR * 0.5, '#ff8c00');
+          if ((this.game.winStreak || 0) >= 4) this._addEmber(sx, sy + slotR * 0.4, '#ffd54f');
         }
         // ③ 刚出炉发亮：合成完成 1.2s 内槽位金环余晖
         if (bb._glowT && _nowMs - bb._glowT < 1200) {
@@ -1805,7 +1816,8 @@ class Renderer {
         }
         // 合成台：所有等级陀螺尺寸一致（uniformSize），避免高等级陀螺超出槽位
         // maxSize = slotR*1.88 → 陀螺直径占虚线槽位直径的 94%（原 1.8=90%，视觉偏空）
-        drawBeyblade(ctx, sx, sy, bb, Math.max(0.5, slotR / 50) * bounce, { maxSize: slotR * 1.88 * bounce, uniformSize: true });
+        // uprightLevel：陀螺自转但中央等级数字保持正立——数字是"该合成哪只"的功能信息
+        drawBeyblade(ctx, sx, sy, bb, Math.max(0.5, slotR / 50) * bounce, { maxSize: slotR * 1.88 * bounce, uniformSize: true, uprightLevel: true });
         // 属性角标已去除（陀螺本体为纯净 PNG + 中央等级数字）
       } else if (!this.game.tutorialDone && this.game.inventory.length > 0) {
         // 新手期空槽提示：轻量"拖入"引导（仅教学未完成且有库存时）
@@ -3042,7 +3054,8 @@ class Renderer {
       ctx.strokeText('出炉！', 0, 0);
       ctx.fillStyle = '#ffd54f';
       ctx.shadowColor = '#ffd54f';
-      ctx.shadowBlur = this._fxLow ? 0 : 16;
+      // 低端档判定用 shadowScale === 0（Renderer 的真实低端信号；this._fxLow 在 Renderer 上从未被赋值，恒为假）
+      ctx.shadowBlur = this.shadowScale === 0 ? 0 : 16;
       ctx.fillText('出炉！', 0, 0);
       ctx.restore();
     }
@@ -4728,6 +4741,26 @@ class Renderer {
         maxLife: 0.8
       });
     }
+  }
+
+  /**
+   * 炉火星（陀螺即角色·连胜态 · 2026-11-24）：从 (x,y) 向上飘的单粒余烬。
+   * 与 addParticles 的区别：那是四散爆开；这里是有向上初速的缓飘，读作"炉边冒火星"。
+   * 同受 particles 200 粒硬上限保护。
+   */
+  _addEmber(x, y, color) {
+    if (this.particles.length >= 200) return;
+    const life = 0.7 + Math.random() * 0.5;
+    this.particles.push({
+      x: x + (Math.random() - 0.5) * 18,
+      y,
+      vx: (Math.random() - 0.5) * 16,
+      vy: -(34 + Math.random() * 26),
+      size: 1.4 + Math.random() * 1.6,
+      color,
+      life,
+      maxLife: life
+    });
   }
 
   /** 环形扩散冲击波（合成成功 / 升级时用），跟随 renderer 帧更新 */

@@ -27,6 +27,15 @@ console.log('【B】陀螺即角色（待机姿态三态）');
 ok('① 待机旋转跟随炉温（满2.6/正常1.8/低0.7 rad·s⁻¹）', /_spin = _hp >= 1 \? 2\.6 : \(_hp >= 0\.3 \? 1\.8 : 0\.7\)/.test(rsrc));
 ok('② 连胜火星拖尾（≥2 冒火星 / ≥4 加金粒，低频 260ms）', /winStreak \|\| 0\) >= 2 && _nowMs - \(this\._flameT \|\| 0\) > 260/.test(rsrc));
 ok('③ 出炉金环余晖（合成 1.2s 内，_glowT）', /_glowT && _nowMs - bb\._glowT < 1200/.test(rsrc));
+const bsrc = fs.readFileSync(path.join(__dirname, '..', 'src', 'beyblade.js'), 'utf8');
+ok('合成台等级数字正立（beyblade uprightLevel 选项 + 合成台启用）',
+   /uprightLevel\) ctx\.rotate\(-a\)/.test(bsrc) && /uprightLevel: true/.test(rsrc));
+const _initIdx = rsrc.indexOf('if (this._homeSpinT == null) this._homeSpinT = _nowMs;');
+const _updIdx = rsrc.indexOf('this._homeSpinT = _nowMs;', _initIdx + 10);
+const _loopIdx = rsrc.indexOf('for (let i = 0; i < 3; i++)');
+ok('帧步长在槽位循环外取（初始化与每帧更新都在 for 循环之前，防多槽 dt≈0）',
+   _initIdx > 0 && _updIdx > _initIdx && _loopIdx > _updIdx &&
+   /const _sdt = Math\.min\(0\.12, Math\.max\(0, \(_nowMs - this\._homeSpinT\) \/ 1000\)\)/.test(rsrc));
 ok('main 合成时写 _glowT', /merged\._glowT = Date\.now\(\)/.test(msrc));
 
 console.log('【C】战报分享卡（离屏 canvas 动态生成）');

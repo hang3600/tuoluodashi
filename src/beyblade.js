@@ -762,6 +762,8 @@ function drawBeybladeVector(ctx, x, y, bb, scale, opts = {}) {
   ctx.fillStyle = tier.color; ctx.beginPath(); ctx.arc(0, 0, r * 0.18, 0, Math.PI * 2); ctx.fill();
   ctx.rotate(a);
   // 等级数字（中央，与 PNG sprite 一致）
+  // uprightLevel：数字不随自转（默认 false=沿用"跟转"约定；合成台待机旋转时开启——那里数字是功能信息）
+  if (opts.uprightLevel) ctx.rotate(-a);
   ctx.fillStyle = '#ffffff'; ctx.font = 'bold ' + Math.floor(r * 0.5) + 'px sans-serif';
   ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
   ctx.strokeStyle = 'rgba(12,6,28,0.8)'; ctx.lineWidth = 3;
@@ -774,6 +776,7 @@ function drawBeybladeVector(ctx, x, y, bb, scale, opts = {}) {
  * 绘制单个陀螺（带离屏精灵缓存）
  * 精灵按 tierIndex:level 烘焙一次；绘制时按 scale 缩放并 rotate(angle) 实现自转。
  * 元素角标不随旋转（固定右上），故单独绘制，保证可读性。
+ * opts.uprightLevel=true：中央等级数字保持正立（不随 angle 自转），供自转中的功能位（合成台）使用。
  */
 function drawBeyblade(ctx, x, y, bb, scale = 1, opts = {}) {
   const r = bb.radius * scale;
@@ -824,6 +827,8 @@ function drawBeyblade(ctx, x, y, bb, scale = 1, opts = {}) {
   }
 
   // 等级数字（中央，叠加在 PNG 上，加深色描边保证在 PNG 上也清晰）
+  // uprightLevel：数字不随自转（默认 false，沿用"跟转"约定；合成台待机旋转时开启）
+  if (opts.uprightLevel) ctx.rotate(-a);
   ctx.fillStyle = '#ffffff';
   ctx.font = 'bold ' + Math.floor(drawS * 0.25) + 'px sans-serif';
   ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
